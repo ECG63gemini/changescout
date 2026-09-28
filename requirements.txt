@@ -1,0 +1,9 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+jinja2==3.1.6
+python-multipart==0.0.20
+playwright==1.55.0
+pillow==12.3.0
+beautifulsoup4==4.13.5
+browser-use==0.13.10
+python-dotenv==1.2.2
