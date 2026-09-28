@@ -9,6 +9,7 @@ A deliberately small competitor-page monitoring product.
 - Compare the newest capture with the previous one
 - Flag meaningful visual/text changes
 - Classify text changes as price, promotion, shipping, product, CTA, positioning, or other
+- Show high-confidence old → new business changes with deterministic impact explanations
 - Optionally use `browser-use`'s OpenAI client to summarize already-extracted changes
 
 This is designed as a **managed-service MVP**. Do not add teams, complex billing, multi-user auth, Slack, or scheduled jobs until customers pay.
@@ -45,6 +46,28 @@ Run the offline test suite with:
 ```bash
 pytest -q
 ```
+
+## Controlled report demo
+
+The included fixtures demonstrate a $99 → $79 price decrease, a lower
+free-shipping threshold, a CTA change, and a newly added 20% promotion.
+They do not use the internet or relax URL security.
+
+With ChangeScout running, seed the baseline:
+
+```bash
+python seed_demo.py before
+```
+
+Open the report URL printed by the command. In a second terminal, apply the
+controlled after state:
+
+```bash
+python seed_demo.py after
+```
+
+Refresh the same report page to show the structured PRICE, SHIPPING,
+PROMOTION, and CTA changes.
 
 ## Fastest launch model
 1. You manually add each customer's competitor URLs.

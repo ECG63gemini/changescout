@@ -25,10 +25,15 @@ from playwright.async_api import (
 )
 
 from monitoring import (
+    BUSINESS_CATEGORIES,
     ChangeAssessment,
+    StructuredChange,
     URLValidationError,
     assess_change,
+    deserialize_structured_changes,
     extract_visible_text,
+    extract_structured_changes,
+    serialize_structured_changes,
     validate_public_url,
 )
 
@@ -80,6 +85,7 @@ def init_db():
             visual_score REAL,
             text_score REAL,
             categories TEXT,
+            structured_changes TEXT NOT NULL DEFAULT '[]',
             summary TEXT,
             FOREIGN KEY(target_id) REFERENCES targets(id)
         )
@@ -89,6 +95,11 @@ def init_db():
         }
         if "categories" not in columns:
             conn.execute("ALTER TABLE captures ADD COLUMN categories TEXT")
+        if "structured_changes" not in columns:
+            conn.execute(
+                "ALTER TABLE captures ADD COLUMN structured_changes "
+                "TEXT NOT NULL DEFAULT '[]'"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS captures_target_id_id "
             "ON captures(target_id, id DESC)"
@@ -383,6 +394,7 @@ def _score_display(value: object) -> str:
 def _change_summary(
     assessment: ChangeAssessment,
     visual_score: float | None,
+    structured_changes: tuple[StructuredChange, ...],
     *,
     visual_error: bool,
 ) -> str:
@@ -396,13 +408,80 @@ def _change_summary(
 
     categories = ", ".join(assessment.categories)
     visual = _score_display(visual_score)
-    summary = (
-        f"{categories} change detected: {assessment.text_score:.1f}% text "
-        f"difference and {visual} visual difference."
-    )
+    if structured_changes:
+        count = len(structured_changes)
+        noun = "change" if count == 1 else "changes"
+        summary = (
+            f"{count} meaningful business {noun} detected: {categories}. "
+            f"Text difference {assessment.text_score:.1f}%; "
+            f"visual difference {visual}."
+        )
+    else:
+        summary = (
+            f"{categories} change detected: {assessment.text_score:.1f}% text "
+            f"difference and {visual} visual difference."
+        )
     if visual_error:
         summary += " Visual comparison was unavailable for this check."
     return summary
+
+
+def _capture_changes(capture: sqlite3.Row) -> tuple[StructuredChange, ...]:
+    try:
+        return deserialize_structured_changes(capture["structured_changes"])
+    except ValueError as exc:
+        logger.warning(
+            "Capture %s has invalid structured change data: %s",
+            capture["id"],
+            exc,
+        )
+        return ()
+
+
+def _change_cards(changes: tuple[StructuredChange, ...]) -> str:
+    return "".join(
+        f"""
+<article class="change-card">
+<span class="change-category">{_html(change.category)}</span>
+<div class="change-values">
+<div><span class="change-label">Old</span><strong>{_html(change.old_value)}</strong></div>
+<div class="change-arrow" aria-hidden="true">→</div>
+<div><span class="change-label">New</span><strong>{_html(change.new_value)}</strong></div>
+</div>
+<p class="change-impact"><span class="change-label">Impact</span>{_html(change.description)}</p>
+</article>
+"""
+        for change in changes
+    )
+
+
+def _latest_changes_panel(capture: sqlite3.Row | None) -> str:
+    if capture is None:
+        return ""
+    changes = _capture_changes(capture)
+    if not changes:
+        return ""
+    return f"""
+<div class="card">
+<h2>Latest business changes</h2>
+<p class="muted">Detected {_html(capture['created_at'])}. Showing {len(changes)} high-confidence changes.</p>
+<div class="change-list">{_change_cards(changes)}</div>
+</div>
+"""
+
+
+def _history_summary(capture: sqlite3.Row) -> str:
+    summary = _html(capture["summary"] or "")
+    changes = _capture_changes(capture)
+    if not changes:
+        return summary
+    count = len(changes)
+    noun = "change" if count == 1 else "changes"
+    return (
+        f"{summary}"
+        f"<details class='history-changes'><summary>View {count} structured {noun}</summary>"
+        f"<div class='change-list compact'>{_change_cards(changes)}</div></details>"
+    )
 
 
 def page_shell(content: str) -> HTMLResponse:
@@ -422,7 +501,18 @@ input{{padding:12px;border:1px solid #d0d5dd;border-radius:10px;width:100%;box-s
 button{{padding:11px 16px;border:0;border-radius:10px;background:#101828;color:white;cursor:pointer}}
 a{{color:#175cd3;text-decoration:none}} .muted{{color:#667085}} .pill{{display:inline-block;background:#eef2ff;border-radius:999px;padding:5px 10px;margin-right:6px}}
 .alert{{background:#fff4ed;border:1px solid #ff8a4c;color:#9c2a10;border-radius:12px;padding:14px;margin:16px 0}}
+.change-list{{display:grid;gap:12px}}
+.change-card{{border:1px solid #d0d5dd;border-left:4px solid #175cd3;border-radius:12px;padding:16px;background:#fcfcfd}}
+.change-category{{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.06em;color:#175cd3;background:#eff8ff;border-radius:999px;padding:4px 9px;margin-bottom:12px}}
+.change-values{{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:14px;align-items:center}}
+.change-values strong{{display:block;overflow-wrap:anywhere}}
+.change-label{{display:block;color:#667085;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px}}
+.change-arrow{{color:#667085;font-size:20px}}
+.change-impact{{margin:14px 0 0;padding-top:12px;border-top:1px solid #eaecf0}}
+.history-changes{{margin-top:8px}} .history-changes summary{{color:#175cd3;cursor:pointer}}
+.change-list.compact{{margin-top:10px;min-width:440px}}
 table{{width:100%;border-collapse:collapse}} td,th{{padding:10px;border-bottom:1px solid #eaecf0;text-align:left;vertical-align:top}}
+@media(max-width:700px){{.change-values{{grid-template-columns:1fr}}.change-arrow{{transform:rotate(90deg)}}.change-list.compact{{min-width:0}}}}
 </style>
 </head>
 <body><div class="wrap">{content}</div></body></html>
@@ -511,6 +601,7 @@ async def check(target_id: int):
     vscore: float | None = 0.0
     tscore = 0.0
     categories = ""
+    structured_changes: tuple[StructuredChange, ...] = ()
     summary = "Baseline capture created."
     if previous:
         visual_error = False
@@ -529,11 +620,33 @@ async def check(target_id: int):
             text,
             visual_score=vscore,
         )
+        if assessment.meaningful:
+            structured_changes = extract_structured_changes(
+                previous["text_content"],
+                text,
+            )
+        reported_category_set = {
+            *assessment.categories,
+            *(change.category for change in structured_changes),
+        }
+        reported_categories = tuple(
+            category
+            for category in BUSINESS_CATEGORIES
+            if category in reported_category_set
+        )
+        if reported_categories != assessment.categories:
+            assessment = ChangeAssessment(
+                text_score=assessment.text_score,
+                meaningful=assessment.meaningful,
+                categories=reported_categories,
+                changed_tokens=assessment.changed_tokens,
+            )
         tscore = assessment.text_score
         categories = ", ".join(assessment.categories)
         summary = _change_summary(
             assessment,
             vscore,
+            structured_changes,
             visual_error=visual_error,
         )
         if assessment.meaningful:
@@ -557,9 +670,10 @@ async def check(target_id: int):
                 visual_score,
                 text_score,
                 categories,
+                structured_changes,
                 summary
             )
-            VALUES(?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
             """, (
                 target_id,
                 datetime.now(timezone.utc).isoformat(),
@@ -569,6 +683,7 @@ async def check(target_id: int):
                 vscore,
                 tscore,
                 categories,
+                serialize_structured_changes(structured_changes),
                 summary,
             ))
     except sqlite3.Error:
@@ -596,9 +711,10 @@ def target_report(target_id: int, error: str | None = None):
         f"<td>{_score_display(c['visual_score'])}</td>"
         f"<td>{_score_display(c['text_score'])}</td>"
         f"<td>{_html(c['categories'] or '—')}</td>"
-        f"<td>{_html(c['summary'] or '')}</td></tr>"
+        f"<td>{_history_summary(c)}</td></tr>"
         for c in caps
     )
+    latest_changes = _latest_changes_panel(caps[0] if caps else None)
     error_message = (
         f"<div class='alert' role='alert'>{_html(error)}</div>" if error else ""
     )
@@ -608,6 +724,7 @@ def target_report(target_id: int, error: str | None = None):
 <p><a href="{_html(target['url'])}" target="_blank" rel="noopener noreferrer">{_html(target['url'])}</a></p>
 {error_message}
 <form method="post" action="/check/{target_id}"><button>Run check</button></form>
+{latest_changes}
 <div class="card">
 <h2>Change history</h2>
 <table><tr><th>Checked</th><th>Visual</th><th>Text</th><th>Category</th><th>Summary</th></tr>{rows or '<tr><td colspan=5>No captures yet.</td></tr>'}</table>

@@ -3,17 +3,23 @@ from pathlib import Path
 import pytest
 
 from monitoring import (
+    MAX_STRUCTURED_CHANGES,
+    StructuredChange,
     URLValidationError,
     assess_change,
     classify_business_changes,
+    deserialize_structured_changes,
     extract_visible_text,
+    extract_structured_changes,
     is_meaningful_change,
     normalize_text,
+    serialize_structured_changes,
     text_change_score,
     validate_public_url,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+DEMO = Path(__file__).parents[1] / "demo"
 PUBLIC_IP = "93.184.216.34"
 
 
@@ -184,3 +190,124 @@ def test_large_visual_change_can_be_meaningful_without_text_change() -> None:
     )
     assert assessment.meaningful is True
     assert assessment.categories == ("OTHER",)
+
+
+def test_controlled_demo_extracts_required_structured_changes() -> None:
+    old = extract_visible_text(
+        (DEMO / "store_before.html").read_text(encoding="utf-8")
+    )
+    new = extract_visible_text(
+        (DEMO / "store_after.html").read_text(encoding="utf-8")
+    )
+
+    changes = extract_structured_changes(old, new)
+    by_category = {change.category: change for change in changes}
+
+    assert {"PRICE", "SHIPPING", "CTA", "PROMOTION"} <= set(by_category)
+    assert by_category["PRICE"].old_value == "$99"
+    assert by_category["PRICE"].new_value == "$79"
+    assert by_category["PRICE"].description == (
+        "Price decreased by $20 (20.2%)."
+    )
+    assert by_category["SHIPPING"].description == (
+        "Free-shipping threshold decreased by $50."
+    )
+    assert by_category["CTA"].old_value == "Shop Now"
+    assert by_category["CTA"].new_value == "Start Shopping"
+    assert by_category["PROMOTION"].old_value == "No visible promotion"
+    assert by_category["PROMOTION"].new_value == "20% off this week"
+
+
+def test_decimal_price_change_calculates_absolute_and_percentage_difference() -> None:
+    changes = extract_structured_changes(
+        "Trail Pack\nPrice: $129.99",
+        "Trail Pack\nPrice: $109.99",
+    )
+
+    assert changes == (
+        StructuredChange(
+            category="PRICE",
+            old_value="$129.99",
+            new_value="$109.99",
+            description="Price decreased by $20 (15.4%).",
+            importance=5,
+        ),
+    )
+
+
+def test_price_changes_pair_with_their_nearby_product_context() -> None:
+    changes = extract_structured_changes(
+        "Trail Pack\n$99\nWater Bottle\n$20",
+        "Trail Pack\n$79\nWater Bottle\n$25",
+    )
+    prices = [change for change in changes if change.category == "PRICE"]
+
+    assert [(change.old_value, change.new_value) for change in prices] == [
+        ("$99", "$79"),
+        ("$20", "$25"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected_description"),
+    [
+        (
+            "10% off sitewide",
+            "20% off sitewide",
+            "Discount increased by 10 percentage points.",
+        ),
+        (
+            "No weekly offer",
+            "Buy one get one free - limited time",
+            "Promotion added.",
+        ),
+    ],
+)
+def test_structured_promotion_changes(
+    old: str,
+    new: str,
+    expected_description: str,
+) -> None:
+    changes = extract_structured_changes(old, new)
+    promotion = next(
+        change for change in changes if change.category == "PROMOTION"
+    )
+    assert promotion.description == expected_description
+
+
+def test_structured_positioning_change_requires_a_short_message() -> None:
+    changes = extract_structured_changes(
+        "Premium gear for modern teams",
+        "Affordable gear for growing teams",
+    )
+    assert changes == (
+        StructuredChange(
+            category="POSITIONING",
+            old_value="Premium gear for modern teams",
+            new_value="Affordable gear for growing teams",
+            description="Marketing message changed.",
+            importance=3,
+        ),
+    )
+
+    long_old = " ".join(f"old{index}" for index in range(30))
+    long_new = " ".join(f"new{index}" for index in range(30))
+    assert extract_structured_changes(long_old, long_new) == ()
+
+
+def test_structured_changes_are_capped_and_serializable() -> None:
+    old = "Catalog"
+    new = "\n".join(f"{amount}% off item {amount}" for amount in range(1, 15))
+    changes = extract_structured_changes(old, new)
+
+    assert len(changes) == MAX_STRUCTURED_CHANGES
+    assert deserialize_structured_changes(
+        serialize_structured_changes(changes)
+    ) == changes
+
+
+def test_unrelated_numbers_are_not_reported_as_prices() -> None:
+    assert extract_structured_changes(
+        "Order 129\n99 customer reviews",
+        "Order 130\n100 customer reviews",
+    ) == ()
