@@ -7,3 +7,4 @@ pillow==12.3.0
 beautifulsoup4==4.13.5
 browser-use==0.13.10
 python-dotenv==1.2.2
+pytest==8.4.2

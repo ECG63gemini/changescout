@@ -8,9 +8,18 @@ A deliberately small competitor-page monitoring product.
 - Extract visible text
 - Compare the newest capture with the previous one
 - Flag meaningful visual/text changes
-- Optionally use `browser-use` + OpenAI to summarize what changed
+- Classify text changes as price, promotion, shipping, product, CTA, positioning, or other
+- Optionally use `browser-use`'s OpenAI client to summarize already-extracted changes
 
 This is designed as a **managed-service MVP**. Do not add teams, complex billing, multi-user auth, Slack, or scheduled jobs until customers pay.
+
+## Monitoring safeguards
+
+- Only public HTTP/HTTPS URLs are accepted. ChangeScout rejects internal hostnames and DNS results in private, loopback, link-local, or reserved IP ranges.
+- Browser requests and redirects are revalidated during capture.
+- Captures retry once after browser failures, do not require `networkidle`, and cap screenshots at 12,000 pixels high.
+- Navigation/footer boilerplate, scripts, styles, hidden content, and repeated text are excluded from text comparisons.
+- Failed checks are not stored as successful captures and show a useful message on the target report.
 
 ## Local setup
 
@@ -30,6 +39,12 @@ uvicorn app:app --reload
 ```
 
 Open http://127.0.0.1:8000
+
+Run the offline test suite with:
+
+```bash
+pytest -q
+```
 
 ## Fastest launch model
 1. You manually add each customer's competitor URLs.
