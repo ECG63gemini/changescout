@@ -100,17 +100,24 @@ python send_test_email.py owner@example.com
 
 ## Railway deployment
 
-Mount a Railway persistent volume at `/data` and configure:
+Railway builds the service from the included `Dockerfile`. Mount a Railway
+persistent volume at `/data` and configure:
 
 ```dotenv
 DATA_DIR=/data
 ```
 
+The image starts exactly one application process with Railway's `PORT`:
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port "$PORT"
+```
+
 ChangeScout will create the directory structure and store its SQLite database
 and screenshots under that volume. When `DATA_DIR` is unset or blank, local
 behavior is unchanged and runtime data stays in the repository's `data/`
-directory. Continue running one application process because the scheduler is
-single-process.
+directory. Do not override the start command with multiple workers, and keep
+the Railway service at one replica because the scheduler is single-process.
 
 ## Controlled report demo
 
