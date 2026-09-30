@@ -98,6 +98,20 @@ Test SMTP configuration without creating a page change:
 python send_test_email.py owner@example.com
 ```
 
+## Railway deployment
+
+Mount a Railway persistent volume at `/data` and configure:
+
+```dotenv
+DATA_DIR=/data
+```
+
+ChangeScout will create the directory structure and store its SQLite database
+and screenshots under that volume. When `DATA_DIR` is unset or blank, local
+behavior is unchanged and runtime data stays in the repository's `data/`
+directory. Continue running one application process because the scheduler is
+single-process.
+
 ## Controlled report demo
 
 The included fixtures demonstrate a $99 → $79 price decrease, a lower

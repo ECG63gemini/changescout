@@ -55,11 +55,18 @@ from scheduling import (
 
 BASE = Path(__file__).resolve().parent
 load_dotenv(BASE / ".env")
-DATA = BASE / "data"
-SHOTS = DATA / "screenshots"
-DATA.mkdir(exist_ok=True)
-SHOTS.mkdir(exist_ok=True)
-DB = DATA / "changescout.db"
+
+
+def _runtime_data_paths(base: Path) -> tuple[Path, Path, Path]:
+    configured = os.getenv("DATA_DIR", "").strip()
+    data = Path(configured).expanduser() if configured else base / "data"
+    screenshots = data / "screenshots"
+    data.mkdir(parents=True, exist_ok=True)
+    screenshots.mkdir(parents=True, exist_ok=True)
+    return data, screenshots, data / "changescout.db"
+
+
+DATA, SHOTS, DB = _runtime_data_paths(BASE)
 MAX_SCREENSHOT_HEIGHT = 12_000
 MAX_SCREENSHOT_WIDTH = 1_440
 NAVIGATION_TIMEOUT_MS = 60_000

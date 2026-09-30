@@ -13,6 +13,40 @@ from monitoring import (
 DEMO = Path(__file__).parents[1] / "demo"
 
 
+def test_runtime_data_paths_default_to_repository_data(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    base = tmp_path / "project"
+
+    data, screenshots, database = app_module._runtime_data_paths(base)
+
+    assert data == base / "data"
+    assert screenshots == base / "data" / "screenshots"
+    assert database == base / "data" / "changescout.db"
+    assert data.is_dir()
+    assert screenshots.is_dir()
+
+
+def test_runtime_data_paths_respect_configured_directory(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    volume = tmp_path / "railway-volume"
+    monkeypatch.setenv("DATA_DIR", str(volume))
+
+    data, screenshots, database = app_module._runtime_data_paths(
+        tmp_path / "project"
+    )
+
+    assert data == volume
+    assert screenshots == volume / "screenshots"
+    assert database == volume / "changescout.db"
+    assert data.is_dir()
+    assert screenshots.is_dir()
+
+
 def test_init_db_migrates_existing_capture_table(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(app_module, "DB", tmp_path / "legacy.db")
     with app_module.db() as conn:
