@@ -70,8 +70,18 @@ def seed_before() -> int:
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:
         cursor = conn.execute(
-            "INSERT INTO targets(name,url,created_at) VALUES(?,?,?)",
-            (DEMO_NAME, DEMO_URL, now),
+            """
+            INSERT INTO targets(
+                name,
+                url,
+                enabled,
+                check_frequency,
+                last_check_at,
+                created_at
+            )
+            VALUES(?,?,?,?,?,?)
+            """,
+            (DEMO_NAME, DEMO_URL, 0, "daily", now, now),
         )
         target_id = int(cursor.lastrowid)
         screenshot = _write_screenshot(target_id, "before", text)
@@ -173,6 +183,10 @@ def seed_after() -> int:
                 serialize_structured_changes(changes),
                 summary,
             ),
+        )
+        conn.execute(
+            "UPDATE targets SET last_check_at=? WHERE id=?",
+            (now, target_id),
         )
     return target_id
 

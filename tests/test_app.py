@@ -35,12 +35,22 @@ def test_init_db_migrates_existing_capture_table(tmp_path, monkeypatch) -> None:
     app_module.init_db()
 
     with app_module.db() as conn:
-        columns = {
+        capture_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(captures)").fetchall()
         }
-    assert "categories" in columns
-    assert "structured_changes" in columns
+        target_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(targets)").fetchall()
+        }
+    assert {"categories", "structured_changes", "alert_status"} <= capture_columns
+    assert {
+        "enabled",
+        "alert_email",
+        "check_frequency",
+        "last_check_at",
+        "last_check_error",
+    } <= target_columns
 
 
 def test_failed_capture_redirects_to_a_useful_escaped_message(
