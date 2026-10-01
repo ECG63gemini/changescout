@@ -4,6 +4,7 @@ A deliberately small competitor-page monitoring product.
 
 ## What it does
 - Add a competitor URL
+- Group competitor monitors by managed-service customer
 - Capture the page as a screenshot
 - Extract visible text
 - Compare the newest capture with the previous one
@@ -68,9 +69,30 @@ Set `SCHEDULER_POLL_SECONDS` to a smaller value such as `5` for local testing.
 Targets with no previous attempt are due immediately. A failed attempt is
 recorded and does not prevent other due targets from running.
 
+Targets created from a customer page use that customer's email as their alert
+recipient. Disabling a customer pauses scheduled checks for all of that
+customer's targets without deleting targets or history. Re-enabling the
+customer makes enabled targets eligible for the scheduler again. Existing
+targets that are not assigned to a customer continue to run normally.
+
 Set `DISPLAY_TIMEZONE=America/New_York` in `.env` to show UI and email times
 in that timezone. If unset or invalid, displayed times use UTC. Stored
 timestamps and monitoring schedules remain in UTC.
+
+## Operator customer onboarding
+
+Open `/customers` from the dashboard, then:
+
+1. Enter the customer's name and alert email and select **Create customer**.
+2. On the customer page, add each competitor name, public URL, check
+   frequency, and enabled/disabled setting.
+3. Confirm the customer's email in the **Alert recipient** column. The
+   customer page does not require re-entering it for each monitor.
+4. Use **Disable customer** to pause every scheduled monitor for that customer
+   while retaining all reports and history.
+
+The original dashboard form still creates an unassigned monitor and keeps its
+explicit per-target alert email behavior.
 
 ## Email alerts
 
@@ -122,6 +144,9 @@ and screenshots under that volume. When `DATA_DIR` is unset or blank, local
 behavior is unchanged and runtime data stays in the repository's `data/`
 directory. Do not override the start command with multiple workers, and keep
 the Railway service at one replica because the scheduler is single-process.
+On the first deployment of customer management, startup creates the
+`customers` table and adds a nullable `customer_id` column to `targets`.
+Existing monitors remain unassigned and continue working.
 
 ## Controlled report demo
 
@@ -147,8 +172,8 @@ PROMOTION, and CTA changes. Demo targets are created with automatic monitoring
 disabled so the scheduler does not replace the deterministic fixture.
 
 ## Fastest launch model
-1. You manually add each customer's competitor URLs.
-2. Configure the customer's alert recipient and monitoring frequency.
+1. Create the customer once from the customer management page.
+2. Add the customer's competitor URLs with their monitoring frequencies.
 3. Keep one ChangeScout process running to perform due checks and send alerts.
 4. Charge a setup fee + monthly monitoring.
 5. Add external worker infrastructure only after customer demand justifies it.

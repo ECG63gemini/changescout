@@ -139,8 +139,18 @@ def db() -> sqlite3.Connection:
 def init_db():
     with db() as conn:
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS customers(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+        """)
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS targets(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER,
             name TEXT NOT NULL,
             url TEXT NOT NULL,
             enabled INTEGER NOT NULL DEFAULT 1,
@@ -148,7 +158,8 @@ def init_db():
             check_frequency TEXT NOT NULL DEFAULT 'daily',
             last_check_at TEXT,
             last_check_error TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(customer_id) REFERENCES customers(id)
         )
         """)
         conn.execute("""
@@ -175,6 +186,7 @@ def init_db():
             row["name"] for row in conn.execute("PRAGMA table_info(targets)").fetchall()
         }
         target_migrations = {
+            "customer_id": "INTEGER REFERENCES customers(id)",
             "enabled": "INTEGER NOT NULL DEFAULT 1",
             "alert_email": "TEXT",
             "check_frequency": "TEXT NOT NULL DEFAULT 'daily'",
@@ -234,6 +246,10 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS captures_target_id_id "
             "ON captures(target_id, id DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS targets_customer_id "
+            "ON targets(customer_id)"
         )
 
 init_db()
@@ -556,9 +572,14 @@ async def deliver_capture_alert(
     with db() as conn:
         capture = conn.execute(
             """
-            SELECT c.*, t.name AS target_name, t.url AS target_url
+            SELECT c.*,
+                   t.name AS target_name,
+                   t.url AS target_url,
+                   t.customer_id,
+                   customer.active AS customer_active
             FROM captures c
             JOIN targets t ON t.id=c.target_id
+            LEFT JOIN customers customer ON customer.id=t.customer_id
             WHERE c.id=?
             """,
             (capture_id,),
@@ -567,6 +588,14 @@ async def deliver_capture_alert(
         raise ValueError(f"Capture {capture_id} does not exist.")
     if capture["alert_status"] != "pending":
         return str(capture["alert_status"])
+
+    if (
+        capture["customer_id"] is not None
+        and not bool(capture["customer_active"])
+    ):
+        error = "The customer is disabled; the alert was not sent."
+        _update_alert_status(capture_id, "customer_disabled", error=error)
+        return "customer_disabled"
 
     try:
         changes = deserialize_structured_changes(capture["structured_changes"])
@@ -770,7 +799,13 @@ def _alert_display(capture: sqlite3.Row) -> str:
     if status in {"pending", "sending"}:
         label = "Pending" if status == "pending" else "Sending"
         return f"<span class='status pending'>{label}</span>"
-    if status in {"failed", "not_configured", "no_recipient", "indeterminate"}:
+    if status in {
+        "failed",
+        "not_configured",
+        "no_recipient",
+        "indeterminate",
+        "customer_disabled",
+    }:
         if status == "failed":
             label = "Failed"
         elif status == "indeterminate":
@@ -823,7 +858,13 @@ def _frequency_options(selected: str) -> str:
     )
 
 
-def _next_check_display(target: sqlite3.Row) -> str:
+def _next_check_display(
+    target: sqlite3.Row,
+    *,
+    customer_active: bool = True,
+) -> str:
+    if not customer_active:
+        return "Customer disabled"
     if not bool(target["enabled"]):
         return "Disabled"
     try:
@@ -888,9 +929,17 @@ table{{width:100%;border-collapse:collapse}} td,th{{padding:10px;border-bottom:1
 
 
 def _dashboard_target_row(target: sqlite3.Row) -> str:
-    enabled = bool(target["enabled"])
-    monitoring_class = "good" if enabled else "warning"
-    monitoring_label = "Enabled" if enabled else "Disabled"
+    target_enabled = bool(target["enabled"])
+    customer_active = (
+        target["customer_id"] is None or bool(target["customer_active"])
+    )
+    monitoring_class = "good" if target_enabled and customer_active else "warning"
+    if not target_enabled:
+        monitoring_label = "Disabled"
+    elif not customer_active:
+        monitoring_label = "Paused (customer inactive)"
+    else:
+        monitoring_label = "Enabled"
     frequency = FREQUENCY_LABELS.get(
         target["check_frequency"],
         target["check_frequency"],
@@ -901,13 +950,21 @@ def _dashboard_target_row(target: sqlite3.Row) -> str:
         else ""
     )
     has_been_checked = target["last_check_at"] is not None
+    customer = (
+        f"<br><span class='muted'>Customer: "
+        f"<a href='/customer/{target['customer_id']}'>"
+        f"{_html(target['customer_name'])}</a></span>"
+        if target["customer_id"] is not None
+        else ""
+    )
+    alert_email = target["alert_email"] or target["customer_email"]
     return f"""
 <tr>
-<td><b>{_html(target['name'])}</b><br><span class="muted">{_html(target['url'])}</span></td>
+<td><b>{_html(target['name'])}</b><br><span class="muted">{_html(target['url'])}</span>{customer}</td>
 <td><span class="status {monitoring_class}">{monitoring_label}</span><br><span class="muted">{_html(frequency)}</span></td>
-<td>{_html(target['alert_email'] or 'Not configured')}</td>
+<td>{_html(alert_email or 'Not configured')}</td>
 <td>{_html(format_display_time(target['last_check_at']) if target['last_check_at'] else 'Never')}{last_error}</td>
-<td>{_html(_next_check_display(target))}</td>
+<td>{_html(_next_check_display(target, customer_active=customer_active))}</td>
 <td>{_score_display(target['visual_score']) if has_been_checked else ''}</td>
 <td>{_score_display(target['text_score']) if has_been_checked else ''}</td>
 <td><form method="post" action="/check/{target['id']}"><button>Check now</button></form></td>
@@ -921,15 +978,21 @@ def home():
     with db() as conn:
         targets = conn.execute("""
         SELECT t.*,
+               customer.name AS customer_name,
+               customer.email AS customer_email,
+               customer.active AS customer_active,
                (SELECT visual_score FROM captures c WHERE c.target_id=t.id ORDER BY c.id DESC LIMIT 1) visual_score,
                (SELECT text_score FROM captures c WHERE c.target_id=t.id ORDER BY c.id DESC LIMIT 1) text_score
-        FROM targets t ORDER BY t.id DESC
+        FROM targets t
+        LEFT JOIN customers customer ON customer.id=t.customer_id
+        ORDER BY t.id DESC
         """).fetchall()
 
     rows = "".join(_dashboard_target_row(target) for target in targets)
     return page_shell(f"""
 <h1>ChangeScout</h1>
 <p class="muted">See what changed on competitor pages without checking them manually.</p>
+<p><a href="/customers">Manage customers</a></p>
 <div class="card">
 <h2>Add competitor</h2>
 <form method="post" action="/targets">
@@ -949,9 +1012,257 @@ def home():
 </div>
 """)
 
+
+def _customer_list_row(customer: sqlite3.Row) -> str:
+    status_class = "good" if customer["active"] else "warning"
+    status_label = "Active" if customer["active"] else "Inactive"
+    activity = (
+        format_display_time(customer["most_recent_activity"])
+        if customer["most_recent_activity"]
+        else "No checks yet"
+    )
+    return f"""
+<tr>
+<td><a href="/customer/{customer['id']}"><b>{_html(customer['name'])}</b></a></td>
+<td>{_html(customer['email'])}</td>
+<td>{customer['monitor_count']}</td>
+<td><span class="status {status_class}">{status_label}</span></td>
+<td>{_html(activity)}</td>
+</tr>
+"""
+
+
+def _customer_target_row(
+    target: sqlite3.Row,
+    *,
+    customer_active: bool,
+    customer_email: str,
+) -> str:
+    target_enabled = bool(target["enabled"])
+    status_class = "good" if target_enabled else "warning"
+    status_label = "Enabled" if target_enabled else "Disabled"
+    last_check = (
+        format_display_time(target["last_check_at"])
+        if target["last_check_at"]
+        else "Never"
+    )
+    if target["latest_change_at"]:
+        latest_change = (
+            f"{_html(target['latest_change_summary'] or 'Meaningful change detected.')}"
+            f"<br><span class='muted'>"
+            f"{_html(format_display_time(target['latest_change_at']))}</span>"
+        )
+    else:
+        latest_change = "<span class='muted'>None yet</span>"
+    return f"""
+<tr>
+<td><b>{_html(target['name'])}</b><br><a href="{_html(target['url'])}" target="_blank" rel="noopener noreferrer">{_html(target['url'])}</a></td>
+<td><span class="status {status_class}">{status_label}</span></td>
+<td>{_html(target['alert_email'] or customer_email)}</td>
+<td>{_html(last_check)}</td>
+<td>{_html(_next_check_display(target, customer_active=customer_active))}</td>
+<td>{latest_change}</td>
+<td><a href="/target/{target['id']}">Report &amp; settings</a></td>
+</tr>
+"""
+
+
+@app.get("/customers", response_class=HTMLResponse)
+def customer_list():
+    with db() as conn:
+        customers = conn.execute(
+            """
+            SELECT customer.*,
+                   COUNT(target.id) AS monitor_count,
+                   MAX(target.last_check_at) AS most_recent_activity
+            FROM customers customer
+            LEFT JOIN targets target ON target.customer_id=customer.id
+            GROUP BY customer.id
+            ORDER BY customer.id DESC
+            """
+        ).fetchall()
+    rows = "".join(_customer_list_row(customer) for customer in customers)
+    return page_shell(f"""
+<p><a href="/">← Dashboard</a></p>
+<h1>Customers</h1>
+<p class="muted">Create and manage customers for the ChangeScout managed service.</p>
+<div class="card">
+<h2>Add customer</h2>
+<form method="post" action="/customers">
+<label>Customer name</label><input name="name" required>
+<label>Customer email</label><input type="email" name="email" required>
+<button>Create customer</button>
+</form>
+</div>
+<div class="card">
+<h2>All customers</h2>
+<table><tr><th>Name</th><th>Email</th><th>Monitors</th><th>Status</th><th>Most recent activity</th></tr>{rows or '<tr><td colspan=5>No customers yet.</td></tr>'}</table>
+</div>
+""")
+
+
+@app.post("/customers")
+def create_customer(
+    name: str = Form(...),
+    email: str = Form(...),
+):
+    name = name.strip()
+    if not name:
+        raise HTTPException(400, "Customer name is required.")
+    try:
+        email = validate_email_address(email)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    with db() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO customers(name, email, created_at, active)
+            VALUES(?,?,?,1)
+            """,
+            (name, email, datetime.now(timezone.utc).isoformat()),
+        )
+        customer_id = int(cursor.lastrowid)
+    return RedirectResponse(f"/customer/{customer_id}", status_code=303)
+
+
+@app.get("/customer/{customer_id}", response_class=HTMLResponse)
+def customer_detail(
+    customer_id: int,
+    notice: str | None = None,
+):
+    with db() as conn:
+        customer = conn.execute(
+            "SELECT * FROM customers WHERE id=?",
+            (customer_id,),
+        ).fetchone()
+        targets = conn.execute(
+            """
+            SELECT target.*,
+                   (
+                       SELECT capture.created_at
+                       FROM captures capture
+                       WHERE capture.target_id=target.id
+                         AND (
+                             TRIM(COALESCE(capture.categories, '')) != ''
+                             OR TRIM(COALESCE(capture.structured_changes, ''))
+                                NOT IN ('', '[]')
+                         )
+                       ORDER BY capture.id DESC
+                       LIMIT 1
+                   ) AS latest_change_at,
+                   (
+                       SELECT capture.summary
+                       FROM captures capture
+                       WHERE capture.target_id=target.id
+                         AND (
+                             TRIM(COALESCE(capture.categories, '')) != ''
+                             OR TRIM(COALESCE(capture.structured_changes, ''))
+                                NOT IN ('', '[]')
+                         )
+                       ORDER BY capture.id DESC
+                       LIMIT 1
+                   ) AS latest_change_summary
+            FROM targets target
+            WHERE target.customer_id=?
+            ORDER BY target.id DESC
+            """,
+            (customer_id,),
+        ).fetchall()
+    if customer is None:
+        raise HTTPException(404)
+
+    active = bool(customer["active"])
+    status_class = "good" if active else "warning"
+    status_label = "Active" if active else "Inactive"
+    status_action = "Disable customer" if active else "Re-enable customer"
+    status_value = "0" if active else "1"
+    notice_message = (
+        f"<div class='card status good' role='status'>{_html(notice)}</div>"
+        if notice
+        else ""
+    )
+    rows = "".join(
+        _customer_target_row(
+            target,
+            customer_active=active,
+            customer_email=customer["email"],
+        )
+        for target in targets
+    )
+    return page_shell(f"""
+<p><a href="/customers">← Customers</a> · <a href="/">Dashboard</a></p>
+<h1>{_html(customer['name'])}</h1>
+<p>{_html(customer['email'])}</p>
+{notice_message}
+<div class="card">
+<h2>Customer status</h2>
+<p><span class="status {status_class}">{status_label}</span> · {len(targets)} monitored competitors</p>
+<form method="post" action="/customer/{customer_id}/status">
+<input type="hidden" name="active" value="{status_value}">
+<button>{status_action}</button>
+</form>
+</div>
+<div class="card">
+<h2>Add competitor monitor</h2>
+<p class="muted">Alerts default to {_html(customer['email'])}.</p>
+<form method="post" action="/customer/{customer_id}/targets">
+<label>Competitor name</label><input name="name" required>
+<label>Public URL</label><input name="url" placeholder="https://example.com/pricing" required>
+<div class="settings-grid">
+<div><label>Check frequency</label><select name="check_frequency">{_frequency_options('daily')}</select></div>
+<label class="wide"><input type="checkbox" name="enabled" value="yes" checked>Enable automatic monitoring</label>
+</div>
+<button>Add monitor</button>
+</form>
+</div>
+<div class="card">
+<h2>Monitored competitors</h2>
+<table><tr><th>Competitor</th><th>Monitoring</th><th>Alert recipient</th><th>Last check</th><th>Next check</th><th>Latest meaningful change</th><th></th></tr>{rows or '<tr><td colspan=7>No monitors yet.</td></tr>'}</table>
+</div>
+""")
+
+
+@app.post("/customer/{customer_id}/status")
+def update_customer_status(
+    customer_id: int,
+    active: str = Form(...),
+):
+    if active not in {"0", "1"}:
+        raise HTTPException(400, "Customer status is invalid.")
+    active_value = int(active)
+    with db() as conn:
+        updated = conn.execute(
+            "UPDATE customers SET active=? WHERE id=?",
+            (active_value, customer_id),
+        )
+    if updated.rowcount != 1:
+        raise HTTPException(404)
+    status = "re-enabled" if active_value else "disabled"
+    notice = quote(f"Customer {status}.", safe="")
+    return RedirectResponse(
+        f"/customer/{customer_id}?notice={notice}",
+        status_code=303,
+    )
+
+
 def _validated_optional_email(value: str) -> str | None:
     candidate = value.strip()
     return validate_email_address(candidate) if candidate else None
+
+
+async def _validated_monitor_fields(
+    name: str,
+    url: str,
+    check_frequency: str,
+) -> tuple[str, str, str]:
+    name = name.strip()
+    if not name:
+        raise ValueError("Name is required.")
+    return (
+        name,
+        await _validate_public_url_async(url),
+        validate_frequency(check_frequency),
+    )
 
 
 def _record_check_failure(target_id: int, error: str) -> None:
@@ -992,7 +1303,14 @@ async def run_target_check(
     try:
         with db() as conn:
             target = conn.execute(
-                "SELECT * FROM targets WHERE id=?",
+                """
+                SELECT target.*,
+                       customer.email AS customer_email,
+                       customer.active AS customer_active
+                FROM targets target
+                LEFT JOIN customers customer ON customer.id=target.customer_id
+                WHERE target.id=?
+                """,
                 (target_id,),
             ).fetchone()
             if target is None:
@@ -1081,7 +1399,9 @@ async def run_target_check(
         created_at = datetime.now(timezone.utc).isoformat()
         alert_status = "pending" if structured_changes else "not_applicable"
         alert_recipient = (
-            target["alert_email"] if structured_changes else None
+            (target["alert_email"] or target["customer_email"])
+            if structured_changes
+            else None
         )
         try:
             with db() as conn:
@@ -1190,9 +1510,15 @@ async def run_due_checks(
         with db() as conn:
             target = conn.execute(
                 """
-                SELECT id, enabled, check_frequency, last_check_at
-                FROM targets
-                WHERE id=?
+                SELECT target.id,
+                       target.customer_id,
+                       target.enabled,
+                       target.check_frequency,
+                       target.last_check_at,
+                       customer.active AS customer_active
+                FROM targets target
+                LEFT JOIN customers customer ON customer.id=target.customer_id
+                WHERE target.id=?
                 """,
                 (target_id,),
             ).fetchone()
@@ -1200,7 +1526,13 @@ async def run_due_checks(
             continue
         try:
             due = target_is_due(
-                enabled=bool(target["enabled"]),
+                enabled=(
+                    bool(target["enabled"])
+                    and (
+                        target["customer_id"] is None
+                        or bool(target["customer_active"])
+                    )
+                ),
                 frequency=target["check_frequency"],
                 last_checked_at=target["last_check_at"],
                 now=now,
@@ -1260,13 +1592,13 @@ async def create_target(
     alert_email: str = Form(""),
     check_frequency: str = Form("daily"),
 ):
-    name = name.strip()
-    if not name:
-        raise HTTPException(400, "Name is required.")
     try:
-        url = await _validate_public_url_async(url)
+        name, url, frequency = await _validated_monitor_fields(
+            name,
+            url,
+            check_frequency,
+        )
         recipient = _validated_optional_email(alert_email)
-        frequency = validate_frequency(check_frequency)
     except (URLValidationError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
     with db() as conn:
@@ -1292,6 +1624,60 @@ async def create_target(
             ),
         )
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/customer/{customer_id}/targets")
+async def create_customer_target(
+    customer_id: int,
+    name: str = Form(...),
+    url: str = Form(...),
+    enabled: str | None = Form(None),
+    check_frequency: str = Form("daily"),
+):
+    with db() as conn:
+        customer = conn.execute(
+            "SELECT email FROM customers WHERE id=?",
+            (customer_id,),
+        ).fetchone()
+    if customer is None:
+        raise HTTPException(404)
+    try:
+        name, url, frequency = await _validated_monitor_fields(
+            name,
+            url,
+            check_frequency,
+        )
+    except (URLValidationError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO targets(
+                customer_id,
+                name,
+                url,
+                enabled,
+                alert_email,
+                check_frequency,
+                created_at
+            )
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                customer_id,
+                name,
+                url,
+                int(enabled is not None),
+                customer["email"],
+                frequency,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+    notice = quote("Monitor added.", safe="")
+    return RedirectResponse(
+        f"/customer/{customer_id}?notice={notice}",
+        status_code=303,
+    )
 
 
 @app.post("/target/{target_id}/settings")
@@ -1349,7 +1735,18 @@ def target_report(
     notice: str | None = None,
 ):
     with db() as conn:
-        target = conn.execute("SELECT * FROM targets WHERE id=?", (target_id,)).fetchone()
+        target = conn.execute(
+            """
+            SELECT target.*,
+                   customer.name AS customer_name,
+                   customer.email AS customer_email,
+                   customer.active AS customer_active
+            FROM targets target
+            LEFT JOIN customers customer ON customer.id=target.customer_id
+            WHERE target.id=?
+            """,
+            (target_id,),
+        ).fetchone()
         caps = conn.execute("SELECT * FROM captures WHERE target_id=? ORDER BY id DESC LIMIT 20", (target_id,)).fetchall()
     if not target:
         raise HTTPException(404)
@@ -1377,10 +1774,26 @@ def target_report(
         if target["last_check_error"] and not error
         else ""
     )
+    customer_line = (
+        f"<p>Customer: <a href='/customer/{target['customer_id']}'>"
+        f"{_html(target['customer_name'])}</a></p>"
+        if target["customer_id"] is not None
+        else ""
+    )
+    customer_email_help = (
+        f"<p class='muted'>Leave blank to use the customer email: "
+        f"{_html(target['customer_email'])}.</p>"
+        if target["customer_id"] is not None
+        else ""
+    )
+    customer_active = (
+        target["customer_id"] is None or bool(target["customer_active"])
+    )
     return page_shell(f"""
 <p><a href="/">← Dashboard</a></p>
 <h1>{_html(target['name'])}</h1>
 <p><a href="{_html(target['url'])}" target="_blank" rel="noopener noreferrer">{_html(target['url'])}</a></p>
+{customer_line}
 {error_message}
 {notice_message}
 {check_error}
@@ -1393,6 +1806,7 @@ def target_report(
 <div>
 <label>Alert email</label>
 <input type="email" name="alert_email" value="{_html(target['alert_email'] or '')}" placeholder="owner@example.com">
+{customer_email_help}
 </div>
 <div>
 <label>Check frequency</label>
@@ -1400,7 +1814,7 @@ def target_report(
 </div>
 <label class="wide"><input type="checkbox" name="enabled" value="yes"{' checked' if target['enabled'] else ''}>Enable automatic monitoring</label>
 </div>
-<p class="muted">Last checked: {_html(format_display_time(target['last_check_at']) if target['last_check_at'] else 'Never')} · Next check: {_html(_next_check_display(target))}</p>
+<p class="muted">Last checked: {_html(format_display_time(target['last_check_at']) if target['last_check_at'] else 'Never')} · Next check: {_html(_next_check_display(target, customer_active=customer_active))}</p>
 <button>Save settings</button>
 </form>
 </div>
