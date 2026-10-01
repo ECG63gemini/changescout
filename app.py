@@ -26,6 +26,15 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from display_time import format_display_time
+from emailing import (
+    EmailContent,
+    EmailDeliveryError,
+    SMTPSettings,
+    render_change_alert,
+    send_email,
+    validate_email_address,
+)
 from monitoring import (
     BUSINESS_CATEGORIES,
     ChangeAssessment,
@@ -37,14 +46,6 @@ from monitoring import (
     extract_structured_changes,
     serialize_structured_changes,
     validate_public_url,
-)
-from emailing import (
-    EmailContent,
-    EmailDeliveryError,
-    SMTPSettings,
-    render_change_alert,
-    send_email,
-    validate_email_address,
 )
 from scheduling import (
     FREQUENCY_LABELS,
@@ -758,7 +759,10 @@ def _alert_display(capture: sqlite3.Row) -> str:
     recipient = capture["alert_recipient"] or ""
     error = capture["alert_error"] or ""
     if status == "sent":
-        sent_at = capture["alert_sent_at"] or "unknown time"
+        sent_at = (
+            format_display_time(capture["alert_sent_at"])
+            if capture["alert_sent_at"] else "unknown time"
+        )
         return (
             f"<span class='status good'>Sent</span><br>"
             f"<span class='muted'>{_html(recipient)} at {_html(sent_at)}</span>"
@@ -789,7 +793,7 @@ def _latest_changes_panel(capture: sqlite3.Row | None) -> str:
     return f"""
 <div class="card">
 <h2>Latest business changes</h2>
-<p class="muted">Detected {_html(capture['created_at'])}. Showing {len(changes)} high-confidence changes.</p>
+<p class="muted">Detected {_html(format_display_time(capture['created_at']))}. Showing {len(changes)} high-confidence changes.</p>
 <p><b>Email alert:</b> {_alert_display(capture)}</p>
 <div class="change-list">{_change_cards(changes)}</div>
 </div>
@@ -829,7 +833,7 @@ def _next_check_display(target: sqlite3.Row) -> str:
         )
     except ValueError:
         return "Invalid frequency"
-    return "Due now" if due_at is None else due_at.isoformat()
+    return "Due now" if due_at is None else format_display_time(due_at)
 
 
 def _smtp_configuration_notice() -> str:
@@ -902,7 +906,7 @@ def _dashboard_target_row(target: sqlite3.Row) -> str:
 <td><b>{_html(target['name'])}</b><br><span class="muted">{_html(target['url'])}</span></td>
 <td><span class="status {monitoring_class}">{monitoring_label}</span><br><span class="muted">{_html(frequency)}</span></td>
 <td>{_html(target['alert_email'] or 'Not configured')}</td>
-<td>{_html(target['last_check_at'] or 'Never')}{last_error}</td>
+<td>{_html(format_display_time(target['last_check_at']) if target['last_check_at'] else 'Never')}{last_error}</td>
 <td>{_html(_next_check_display(target))}</td>
 <td>{_score_display(target['visual_score']) if has_been_checked else ''}</td>
 <td>{_score_display(target['text_score']) if has_been_checked else ''}</td>
@@ -1350,7 +1354,7 @@ def target_report(
     if not target:
         raise HTTPException(404)
     rows = "".join(
-        f"<tr><td>{_html(c['created_at'])}</td>"
+        f"<tr><td>{_html(format_display_time(c['created_at']))}</td>"
         f"<td>{_score_display(c['visual_score'])}</td>"
         f"<td>{_score_display(c['text_score'])}</td>"
         f"<td>{_html(c['categories'] or '—')}</td>"
@@ -1396,7 +1400,7 @@ def target_report(
 </div>
 <label class="wide"><input type="checkbox" name="enabled" value="yes"{' checked' if target['enabled'] else ''}>Enable automatic monitoring</label>
 </div>
-<p class="muted">Last checked: {_html(target['last_check_at'] or 'Never')} · Next check: {_html(_next_check_display(target))}</p>
+<p class="muted">Last checked: {_html(format_display_time(target['last_check_at']) if target['last_check_at'] else 'Never')} · Next check: {_html(_next_check_display(target))}</p>
 <button>Save settings</button>
 </form>
 </div>

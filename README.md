@@ -68,6 +68,10 @@ Set `SCHEDULER_POLL_SECONDS` to a smaller value such as `5` for local testing.
 Targets with no previous attempt are due immediately. A failed attempt is
 recorded and does not prevent other due targets from running.
 
+Set `DISPLAY_TIMEZONE=America/New_York` in `.env` to show UI and email times
+in that timezone. If unset or invalid, displayed times use UTC. Stored
+timestamps and monitoring schedules remain in UTC.
+
 ## Email alerts
 
 Configure vendor-neutral SMTP settings in `.env`:

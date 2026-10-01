@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import app as app_module
+from display_time import format_display_time
 from emailing import (
     EmailDeliveryError,
     SMTPSettings,
@@ -153,6 +154,100 @@ def test_frequency_due_logic() -> None:
         now=now,
     )
     assert next_check_at(now, "every_6_hours") == now + timedelta(hours=6)
+
+
+def test_display_time_defaults_to_utc(monkeypatch) -> None:
+    monkeypatch.delenv("DISPLAY_TIMEZONE", raising=False)
+    assert format_display_time("2026-09-30T23:59:08.805491+00:00") == (
+        "Sep 30, 2026 at 11:59 PM UTC"
+    )
+
+
+def test_display_time_converts_to_new_york(monkeypatch) -> None:
+    monkeypatch.setenv("DISPLAY_TIMEZONE", "America/New_York")
+    assert format_display_time("2026-09-30T23:59:08.805491+00:00") == (
+        "Sep 30, 2026 at 7:59 PM EDT"
+    )
+
+
+def test_display_time_observes_daylight_saving(monkeypatch) -> None:
+    monkeypatch.setenv("DISPLAY_TIMEZONE", "America/New_York")
+    assert format_display_time("2026-03-08T06:30:00+00:00") == (
+        "Mar 8, 2026 at 1:30 AM EST"
+    )
+    assert format_display_time("2026-03-08T07:30:00+00:00") == (
+        "Mar 8, 2026 at 3:30 AM EDT"
+    )
+    assert next_check_at("2026-03-08T06:30:00+00:00", "hourly") == (
+        datetime(2026, 3, 8, 7, 30, tzinfo=timezone.utc)
+    )
+
+
+def test_invalid_display_timezone_falls_back_to_utc(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("DISPLAY_TIMEZONE", "Not/A_Timezone")
+    assert format_display_time("2026-09-30T23:59:08+00:00") == (
+        "Sep 30, 2026 at 11:59 PM UTC"
+    )
+    assert "Invalid DISPLAY_TIMEZONE" in caplog.text
+
+
+def test_ui_times_are_local_without_changing_stored_or_scheduled_times(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _use_test_database(tmp_path, monkeypatch)
+    monkeypatch.setenv("DISPLAY_TIMEZONE", "America/New_York")
+    checked_at = "2026-09-30T23:59:08.805491+00:00"
+    target_id = _insert_target(frequency="hourly", last_check_at=checked_at)
+    capture_id = _insert_capture(
+        target_id,
+        "Changed",
+        structured_changes=serialize_structured_changes((
+            StructuredChange(
+                category="PRICE",
+                old_value="$99",
+                new_value="$79",
+                description="Price decreased.",
+                importance=5,
+            ),
+        )),
+        alert_status="sent",
+        alert_recipient="owner@example.com",
+    )
+    with app_module.db() as conn:
+        conn.execute(
+            "UPDATE captures SET created_at=?, alert_sent_at=? WHERE id=?",
+            (checked_at, checked_at, capture_id),
+        )
+        target = conn.execute(
+            "SELECT * FROM targets WHERE id=?", (target_id,)
+        ).fetchone()
+        capture = conn.execute(
+            "SELECT * FROM captures WHERE id=?", (capture_id,)
+        ).fetchone()
+
+    assert target["last_check_at"] == checked_at
+    assert capture["created_at"] == checked_at
+    assert capture["alert_sent_at"] == checked_at
+    assert next_check_at(target["last_check_at"], "hourly") == (
+        datetime(2026, 10, 1, 0, 59, 8, 805491, tzinfo=timezone.utc)
+    )
+    assert target_is_due(
+        enabled=True,
+        frequency="hourly",
+        last_checked_at=target["last_check_at"],
+        now=datetime(2026, 10, 1, 0, 30, tzinfo=timezone.utc),
+    ) is False
+    dashboard = app_module.home().body.decode("utf-8")
+    report = app_module.target_report(target_id).body.decode("utf-8")
+    assert "Sep 30, 2026 at 7:59 PM EDT" in dashboard
+    assert "Sep 30, 2026 at 8:59 PM EDT" in dashboard
+    assert "Last checked: Sep 30, 2026 at 7:59 PM EDT" in report
+    assert "Next check: Sep 30, 2026 at 8:59 PM EDT" in report
+    assert "Detected Sep 30, 2026 at 7:59 PM EDT" in report
+    assert "<td>Sep 30, 2026 at 7:59 PM EDT</td>" in report
+    assert "owner@example.com at Sep 30, 2026 at 7:59 PM EDT" in report
+    assert checked_at not in dashboard + report
 
 
 def test_disabled_monitors_are_not_run(tmp_path, monkeypatch) -> None:
@@ -660,7 +755,8 @@ def test_startup_marks_interrupted_delivery_as_indeterminate(
     assert "whether email was sent is unknown" in capture["alert_error"]
 
 
-def test_email_body_rendering() -> None:
+def test_email_body_rendering(monkeypatch) -> None:
+    monkeypatch.setenv("DISPLAY_TIMEZONE", "America/New_York")
     content = render_change_alert(
         competitor_name="Example Competitor",
         page_url="https://shop.example.com/product",
@@ -689,7 +785,7 @@ def test_email_body_rendering() -> None:
     )
     assert "Competitor: Example Competitor" in content.body
     assert "Page URL: https://shop.example.com/product" in content.body
-    assert "Detected: 2026-01-02T12:00:00+00:00" in content.body
+    assert "Detected: Jan 2, 2026 at 7:00 AM EST" in content.body
     assert "PRICE\n$99 -> $79\nPrice decreased by $20 (20.2%)." in content.body
     assert "PROMOTION\nNo visible promotion -> 20% off this week" in content.body
     assert "https://changescout.example/target/42" in content.body

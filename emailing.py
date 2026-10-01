@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from email.message import EmailMessage
 
+from display_time import format_display_time
 from monitoring import StructuredChange
 
 _EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
@@ -133,7 +134,7 @@ def render_change_alert(
         "",
         f"Competitor: {competitor_name}",
         f"Page URL: {page_url}",
-        f"Detected: {detected_at}",
+        f"Detected: {format_display_time(detected_at)}",
         "",
     ]
     for change in changes:
