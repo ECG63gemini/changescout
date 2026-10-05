@@ -7,12 +7,14 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from html import escape
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from dotenv import load_dotenv
 from PIL import Image, ImageChops, ImageStat
 from playwright.async_api import (
@@ -26,7 +28,7 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from display_time import format_display_time
+import pages
 from emailing import (
     EmailContent,
     EmailDeliveryError,
@@ -48,10 +50,22 @@ from monitoring import (
     validate_public_url,
 )
 from scheduling import (
-    FREQUENCY_LABELS,
-    next_check_at,
     target_is_due,
     validate_frequency,
+)
+from ui import (
+    STATIC_DIR,
+    AttentionItem,
+    FeedItem,
+    MonitorView,
+    disclosure,
+    feed_item,
+    friendly_error,
+    h,
+    monitor_attention,
+    monitor_view,
+    technical_list,
+    utc_now,
 )
 
 BASE = Path(__file__).resolve().parent
@@ -107,6 +121,57 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="ChangeScout", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error_page(
+    _request: Request,
+    exc: StarletteHTTPException,
+) -> HTMLResponse:
+    if exc.status_code == 404:
+        title = "Page not found"
+        default = "The page you're looking for doesn't exist or may have been removed."
+    elif exc.status_code >= 500:
+        title = "Something went wrong"
+        default = "Please try again in a moment."
+    else:
+        title = "We couldn't complete that request"
+        default = "Please go back and try again."
+    detail = str(exc.detail or "")
+    generic = {"Not Found", "Bad Request", "Method Not Allowed", "Internal Server Error"}
+    message = default if not detail or detail in generic else detail
+    return HTMLResponse(
+        pages.error_page(title=title, message=message),
+        status_code=exc.status_code,
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_page(
+    request: Request,
+    _exc: RequestValidationError,
+) -> HTMLResponse:
+    # Invalid path parameters (e.g. /customer/abc) are simply pages that don't exist.
+    if request.method in {"GET", "HEAD"}:
+        return HTMLResponse(
+            pages.error_page(
+                title="Page not found",
+                message="The page you're looking for doesn't exist or may have been removed.",
+            ),
+            status_code=404,
+        )
+    return HTMLResponse(
+        pages.error_page(
+            title="Some information is missing",
+            message=(
+                "Some required information was missing or invalid. Go back, "
+                "complete every required field, and try again."
+            ),
+        ),
+        status_code=422,
+    )
 
 
 class CaptureError(RuntimeError):
@@ -709,10 +774,6 @@ async def deliver_capture_alert(
     return "sent"
 
 
-def _html(value: object) -> str:
-    return escape(str(value), quote=True)
-
-
 def _score_display(value: object) -> str:
     if value is None:
         return "Unavailable"
@@ -766,305 +827,230 @@ def _capture_changes(capture: sqlite3.Row) -> tuple[StructuredChange, ...]:
         return ()
 
 
-def _change_cards(changes: tuple[StructuredChange, ...]) -> str:
-    return "".join(
-        f"""
-<article class="change-card">
-<span class="change-category">{_html(change.category)}</span>
-<div class="change-values">
-<div><span class="change-label">Old</span><strong>{_html(change.old_value)}</strong></div>
-<div class="change-arrow" aria-hidden="true">→</div>
-<div><span class="change-label">New</span><strong>{_html(change.new_value)}</strong></div>
-</div>
-<p class="change-impact"><span class="change-label">Impact</span>{_html(change.description)}</p>
-</article>
-"""
-        for change in changes
-    )
+# Only captures with extracted old/new values ever attempt an email alert.
+CHANGES_CAPTURE = "TRIM(COALESCE(capture.structured_changes, '')) NOT IN ('', '[]')"
+MEANINGFUL_CAPTURE = (
+    f"(TRIM(COALESCE(capture.categories, '')) != '' OR {CHANGES_CAPTURE})"
+)
 
-
-def _alert_display(capture: sqlite3.Row) -> str:
-    status = capture["alert_status"] or "not_applicable"
-    recipient = capture["alert_recipient"] or ""
-    error = capture["alert_error"] or ""
-    if status == "sent":
-        sent_at = (
-            format_display_time(capture["alert_sent_at"])
-            if capture["alert_sent_at"] else "unknown time"
-        )
-        return (
-            f"<span class='status good'>Sent</span><br>"
-            f"<span class='muted'>{_html(recipient)} at {_html(sent_at)}</span>"
-        )
-    if status in {"pending", "sending"}:
-        label = "Pending" if status == "pending" else "Sending"
-        return f"<span class='status pending'>{label}</span>"
-    if status in {
-        "failed",
-        "not_configured",
-        "no_recipient",
-        "indeterminate",
-        "customer_disabled",
-    }:
-        if status == "failed":
-            label = "Failed"
-        elif status == "indeterminate":
-            label = "Delivery unknown"
-        else:
-            label = "Not sent"
-        return (
-            f"<span class='status warning'>{label}</span><br>"
-            f"<span class='muted'>{_html(error)}</span>"
-        )
-    return "<span class='muted'>Not needed</span>"
-
-
-def _latest_changes_panel(capture: sqlite3.Row | None) -> str:
-    if capture is None:
-        return ""
-    changes = _capture_changes(capture)
-    if not changes:
-        return ""
-    return f"""
-<div class="card">
-<h2>Latest business changes</h2>
-<p class="muted">Detected {_html(format_display_time(capture['created_at']))}. Showing {len(changes)} high-confidence changes.</p>
-<p><b>Email alert:</b> {_alert_display(capture)}</p>
-<div class="change-list">{_change_cards(changes)}</div>
-</div>
+MONITOR_QUERY = f"""
+SELECT target.id,
+       target.customer_id,
+       target.name,
+       target.url,
+       target.enabled,
+       target.alert_email,
+       target.check_frequency,
+       target.last_check_at,
+       target.last_check_error,
+       customer.name AS customer_name,
+       customer.email AS customer_email,
+       customer.active AS customer_active,
+       latest.id AS latest_id,
+       latest.created_at AS latest_at,
+       latest.categories AS latest_categories,
+       latest.structured_changes AS latest_changes,
+       (
+           SELECT MIN(earliest.id)
+           FROM captures earliest
+           WHERE earliest.target_id=target.id
+       ) AS first_capture_id,
+       report.created_at AS report_at,
+       alerted.created_at AS alerted_at,
+       alerted.alert_status AS alerted_status
+FROM targets target
+LEFT JOIN customers customer ON customer.id=target.customer_id
+LEFT JOIN captures latest ON latest.id=(
+    SELECT capture.id
+    FROM captures capture
+    WHERE capture.target_id=target.id
+    ORDER BY capture.id DESC
+    LIMIT 1
+)
+LEFT JOIN captures report ON report.id=(
+    SELECT capture.id
+    FROM captures capture
+    WHERE capture.target_id=target.id
+      AND {MEANINGFUL_CAPTURE}
+    ORDER BY capture.id DESC
+    LIMIT 1
+)
+LEFT JOIN captures alerted ON alerted.id=(
+    SELECT capture.id
+    FROM captures capture
+    WHERE capture.target_id=target.id
+      AND {CHANGES_CAPTURE}
+    ORDER BY capture.id DESC
+    LIMIT 1
+)
 """
 
+FEED_QUERY = f"""
+SELECT capture.id,
+       capture.target_id,
+       capture.created_at,
+       capture.categories,
+       capture.structured_changes,
+       capture.alert_status,
+       capture.alert_recipient,
+       capture.alert_sent_at,
+       capture.alert_error,
+       capture.summary,
+       capture.visual_score,
+       capture.text_score,
+       target.name AS target_name,
+       target.url AS target_url,
+       target.customer_id,
+       customer.name AS customer_name
+FROM captures capture
+JOIN targets target ON target.id=capture.target_id
+LEFT JOIN customers customer ON customer.id=target.customer_id
+WHERE {MEANINGFUL_CAPTURE}
+"""
 
-def _history_summary(capture: sqlite3.Row) -> str:
-    summary = _html(capture["summary"] or "")
-    changes = _capture_changes(capture)
-    if not changes:
-        return summary
-    count = len(changes)
-    noun = "change" if count == 1 else "changes"
-    return (
-        f"{summary}"
-        f"<details class='history-changes'><summary>View {count} structured {noun}</summary>"
-        f"<div class='change-list compact'>{_change_cards(changes)}</div></details>"
-    )
+OVERVIEW_FEED_LIMIT = 8
+CUSTOMER_FEED_LIMIT = 5
+HISTORY_LIMIT = 20
 
 
-def _frequency_options(selected: str) -> str:
-    return "".join(
-        f"<option value='{_html(value)}'"
-        f"{' selected' if value == selected else ''}>"
-        f"{_html(label)}</option>"
-        for value, label in FREQUENCY_LABELS.items()
-    )
-
-
-def _next_check_display(
-    target: sqlite3.Row,
+def _load_monitors(
+    conn: sqlite3.Connection,
     *,
-    customer_active: bool = True,
-) -> str:
-    if not customer_active:
-        return "Customer disabled"
-    if not bool(target["enabled"]):
-        return "Disabled"
-    try:
-        due_at = next_check_at(
-            target["last_check_at"],
-            target["check_frequency"],
-        )
-    except ValueError:
-        return "Invalid frequency"
-    return "Due now" if due_at is None else format_display_time(due_at)
+    now: datetime,
+    customer_id: int | None = None,
+    target_id: int | None = None,
+) -> list[MonitorView]:
+    query = MONITOR_QUERY
+    params: tuple[int, ...] = ()
+    if customer_id is not None:
+        query += " WHERE target.customer_id=?"
+        params = (customer_id,)
+    elif target_id is not None:
+        query += " WHERE target.id=?"
+        params = (target_id,)
+    rows = conn.execute(f"{query} ORDER BY target.id DESC", params).fetchall()
+    return [monitor_view(row, now=now) for row in rows]
 
 
-def _smtp_configuration_notice() -> str:
+def _load_feed(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+    customer_id: int | None = None,
+) -> list[FeedItem]:
+    query = FEED_QUERY
+    params: tuple[int, ...] = ()
+    if customer_id is not None:
+        query += " AND target.customer_id=?"
+        params = (customer_id,)
+    rows = conn.execute(
+        f"{query} ORDER BY capture.id DESC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+    return [feed_item(row) for row in rows]
+
+
+def _email_settings() -> tuple[bool, str | None]:
     settings = SMTPSettings.from_environment()
-    if settings.configured:
-        return (
-            "<p class='status good'>SMTP email delivery is configured.</p>"
+    return settings.configured, settings.configuration_error
+
+
+def _email_attention(configuration_error: str | None) -> AttentionItem:
+    return AttentionItem(
+        title="Email alerts are unavailable",
+        body=(
+            "Changes are still detected and saved to reports, but alert emails "
+            "can't be sent until email delivery is set up."
+            + disclosure(
+                "How to turn on email alerts",
+                technical_list(
+                    [
+                        (
+                            "Configuration",
+                            h(configuration_error or "SMTP settings are incomplete."),
+                        ),
+                        (
+                            "Fix",
+                            "Set the SMTP environment variables on the server, "
+                            "then restart ChangeScout.",
+                        ),
+                    ]
+                ),
+                extra_class="disclosure--quiet",
+            )
+        ),
+        action="",
+        tone="warning",
+        priority=-1,
+    )
+
+
+def _attention_items(
+    monitors: list[MonitorView],
+    *,
+    now: datetime,
+    include_customer: bool,
+) -> list[AttentionItem]:
+    items: list[AttentionItem] = []
+    email_ready, email_error = _email_settings()
+    if not email_ready and any(monitor.active for monitor in monitors):
+        items.append(_email_attention(email_error))
+    for monitor in monitors:
+        items.extend(
+            monitor_attention(monitor, now=now, include_customer=include_customer)
         )
-    return (
-        "<p class='status warning'>Email delivery is not configured: "
-        f"{_html(settings.configuration_error or 'SMTP configuration is incomplete.')} "
-        "Monitoring and reports will continue, but alerts will not be sent.</p>"
-    )
-
-
-def page_shell(content: str) -> HTMLResponse:
-    return HTMLResponse(f"""
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ChangeScout</title>
-<style>
-body{{font-family:ui-sans-serif,system-ui;margin:0;background:#f5f7fb;color:#101828}}
-.wrap{{max-width:1050px;margin:42px auto;padding:0 20px}}
-.card{{background:white;border:1px solid #e4e7ec;border-radius:18px;padding:22px;margin:16px 0;box-shadow:0 8px 24px rgba(16,24,40,.05)}}
-h1{{font-size:34px;margin-bottom:4px}} h2{{margin-top:0}}
-input,select{{padding:12px;border:1px solid #d0d5dd;border-radius:10px;width:100%;box-sizing:border-box;margin:6px 0 12px;background:white}}
-input[type=checkbox]{{width:auto;margin-right:8px}}
-button{{padding:11px 16px;border:0;border-radius:10px;background:#101828;color:white;cursor:pointer}}
-a{{color:#175cd3;text-decoration:none}} .muted{{color:#667085}} .pill{{display:inline-block;background:#eef2ff;border-radius:999px;padding:5px 10px;margin-right:6px}}
-.alert{{background:#fff4ed;border:1px solid #ff8a4c;color:#9c2a10;border-radius:12px;padding:14px;margin:16px 0}}
-.status{{font-weight:700}} .status.good{{color:#067647}} .status.warning{{color:#b54708}} .status.pending{{color:#175cd3}}
-.settings-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px}} .settings-grid .wide{{grid-column:1/-1}}
-.change-list{{display:grid;gap:12px}}
-.change-card{{border:1px solid #d0d5dd;border-left:4px solid #175cd3;border-radius:12px;padding:16px;background:#fcfcfd}}
-.change-category{{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.06em;color:#175cd3;background:#eff8ff;border-radius:999px;padding:4px 9px;margin-bottom:12px}}
-.change-values{{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:14px;align-items:center}}
-.change-values strong{{display:block;overflow-wrap:anywhere}}
-.change-label{{display:block;color:#667085;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px}}
-.change-arrow{{color:#667085;font-size:20px}}
-.change-impact{{margin:14px 0 0;padding-top:12px;border-top:1px solid #eaecf0}}
-.history-changes{{margin-top:8px}} .history-changes summary{{color:#175cd3;cursor:pointer}}
-.change-list.compact{{margin-top:10px;min-width:440px}}
-table{{width:100%;border-collapse:collapse}} td,th{{padding:10px;border-bottom:1px solid #eaecf0;text-align:left;vertical-align:top}}
-@media(max-width:700px){{.change-values,.settings-grid{{grid-template-columns:1fr}}.change-arrow{{transform:rotate(90deg)}}.change-list.compact{{min-width:0}}}}
-</style>
-</head>
-<body><div class="wrap">{content}</div></body></html>
-""")
-
-
-def _dashboard_target_row(target: sqlite3.Row) -> str:
-    target_enabled = bool(target["enabled"])
-    customer_active = (
-        target["customer_id"] is None or bool(target["customer_active"])
-    )
-    monitoring_class = "good" if target_enabled and customer_active else "warning"
-    if not target_enabled:
-        monitoring_label = "Disabled"
-    elif not customer_active:
-        monitoring_label = "Paused (customer inactive)"
-    else:
-        monitoring_label = "Enabled"
-    frequency = FREQUENCY_LABELS.get(
-        target["check_frequency"],
-        target["check_frequency"],
-    )
-    last_error = (
-        f"<br><span class='status warning'>{_html(target['last_check_error'])}</span>"
-        if target["last_check_error"]
-        else ""
-    )
-    has_been_checked = target["last_check_at"] is not None
-    customer = (
-        f"<br><span class='muted'>Customer: "
-        f"<a href='/customer/{target['customer_id']}'>"
-        f"{_html(target['customer_name'])}</a></span>"
-        if target["customer_id"] is not None
-        else ""
-    )
-    alert_email = target["alert_email"] or target["customer_email"]
-    return f"""
-<tr>
-<td><b>{_html(target['name'])}</b><br><span class="muted">{_html(target['url'])}</span>{customer}</td>
-<td><span class="status {monitoring_class}">{monitoring_label}</span><br><span class="muted">{_html(frequency)}</span></td>
-<td>{_html(alert_email or 'Not configured')}</td>
-<td>{_html(format_display_time(target['last_check_at']) if target['last_check_at'] else 'Never')}{last_error}</td>
-<td>{_html(_next_check_display(target, customer_active=customer_active))}</td>
-<td>{_score_display(target['visual_score']) if has_been_checked else ''}</td>
-<td>{_score_display(target['text_score']) if has_been_checked else ''}</td>
-<td><form method="post" action="/check/{target['id']}"><button>Check now</button></form></td>
-<td><a href="/target/{target['id']}">Report &amp; settings</a></td>
-</tr>
-"""
+    # Paused customers are an intentional choice, not a problem, so they are
+    # shown on the Customers pages rather than listed here.
+    return sorted(items, key=lambda item: item.priority)
 
 
 @app.get("/", response_class=HTMLResponse)
 def home():
+    now = utc_now()
     with db() as conn:
-        targets = conn.execute("""
-        SELECT t.*,
-               customer.name AS customer_name,
-               customer.email AS customer_email,
-               customer.active AS customer_active,
-               (SELECT visual_score FROM captures c WHERE c.target_id=t.id ORDER BY c.id DESC LIMIT 1) visual_score,
-               (SELECT text_score FROM captures c WHERE c.target_id=t.id ORDER BY c.id DESC LIMIT 1) text_score
-        FROM targets t
-        LEFT JOIN customers customer ON customer.id=t.customer_id
-        ORDER BY t.id DESC
-        """).fetchall()
-
-    rows = "".join(_dashboard_target_row(target) for target in targets)
-    return page_shell(f"""
-<h1>ChangeScout</h1>
-<p class="muted">See what changed on competitor pages without checking them manually.</p>
-<p><a href="/customers">Manage customers</a></p>
-<div class="card">
-<h2>Add competitor</h2>
-<form method="post" action="/targets">
-<label>Name</label><input name="name" placeholder="Acme Widgets" required>
-<label>Public URL</label><input name="url" placeholder="https://example.com/pricing" required>
-<div class="settings-grid">
-<div><label>Alert email</label><input type="email" name="alert_email" placeholder="owner@example.com"></div>
-<div><label>Check frequency</label><select name="check_frequency">{_frequency_options('daily')}</select></div>
-<label class="wide"><input type="checkbox" name="enabled" value="yes" checked>Enable automatic monitoring</label>
-</div>
-<button>Add monitor</button>
-</form>
-</div>
-<div class="card">
-<h2>Monitors</h2>
-<table><tr><th>Target</th><th>Monitoring</th><th>Alert recipient</th><th>Last check</th><th>Next check</th><th>Visual</th><th>Text</th><th></th><th></th></tr>{rows or '<tr><td colspan=9>No monitors yet.</td></tr>'}</table>
-</div>
-""")
-
-
-def _customer_list_row(customer: sqlite3.Row) -> str:
-    status_class = "good" if customer["active"] else "warning"
-    status_label = "Active" if customer["active"] else "Inactive"
-    activity = (
-        format_display_time(customer["most_recent_activity"])
-        if customer["most_recent_activity"]
-        else "No checks yet"
-    )
-    return f"""
-<tr>
-<td><a href="/customer/{customer['id']}"><b>{_html(customer['name'])}</b></a></td>
-<td>{_html(customer['email'])}</td>
-<td>{customer['monitor_count']}</td>
-<td><span class="status {status_class}">{status_label}</span></td>
-<td>{_html(activity)}</td>
-</tr>
-"""
-
-
-def _customer_target_row(
-    target: sqlite3.Row,
-    *,
-    customer_active: bool,
-    customer_email: str,
-) -> str:
-    target_enabled = bool(target["enabled"])
-    status_class = "good" if target_enabled else "warning"
-    status_label = "Enabled" if target_enabled else "Disabled"
-    last_check = (
-        format_display_time(target["last_check_at"])
-        if target["last_check_at"]
-        else "Never"
-    )
-    if target["latest_change_at"]:
-        latest_change = (
-            f"{_html(target['latest_change_summary'] or 'Meaningful change detected.')}"
-            f"<br><span class='muted'>"
-            f"{_html(format_display_time(target['latest_change_at']))}</span>"
+        monitors = _load_monitors(conn, now=now)
+        feed = _load_feed(conn, limit=OVERVIEW_FEED_LIMIT)
+        customer_counts = conn.execute(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(active), 0) AS active "
+            "FROM customers"
+        ).fetchone()
+    return HTMLResponse(
+        pages.overview_page(
+            now=now,
+            customers_total=int(customer_counts["total"]),
+            customers_active=int(customer_counts["active"]),
+            monitors=monitors,
+            feed=feed,
+            attention=_attention_items(monitors, now=now, include_customer=True),
         )
-    else:
-        latest_change = "<span class='muted'>None yet</span>"
-    return f"""
-<tr>
-<td><b>{_html(target['name'])}</b><br><a href="{_html(target['url'])}" target="_blank" rel="noopener noreferrer">{_html(target['url'])}</a></td>
-<td><span class="status {status_class}">{status_label}</span></td>
-<td>{_html(target['alert_email'] or customer_email)}</td>
-<td>{_html(last_check)}</td>
-<td>{_html(_next_check_display(target, customer_active=customer_active))}</td>
-<td>{latest_change}</td>
-<td><a href="/target/{target['id']}">Report &amp; settings</a></td>
-</tr>
-"""
+    )
+
+
+def _render_monitors(
+    *,
+    notice: str | None = None,
+    form_values: dict[str, str] | None = None,
+    form_errors: dict[str, str] | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    now = utc_now()
+    with db() as conn:
+        monitors = _load_monitors(conn, now=now)
+    return HTMLResponse(
+        pages.monitors_page(
+            now=now,
+            monitors=monitors,
+            notice=notice,
+            form_values=form_values,
+            form_errors=form_errors,
+        ),
+        status_code=status_code,
+    )
+
+
+@app.get("/monitors", response_class=HTMLResponse)
+def monitor_list(notice: str | None = None):
+    return _render_monitors(notice=notice)
 
 
 @app.get("/customers", response_class=HTMLResponse)
@@ -1081,24 +1067,12 @@ def customer_list():
             ORDER BY customer.id DESC
             """
         ).fetchall()
-    rows = "".join(_customer_list_row(customer) for customer in customers)
-    return page_shell(f"""
-<p><a href="/">← Dashboard</a></p>
-<h1>Customers</h1>
-<p class="muted">Create and manage customers for the ChangeScout managed service.</p>
-<div class="card">
-<h2>Add customer</h2>
-<form method="post" action="/customers">
-<label>Customer name</label><input name="name" required>
-<label>Customer email</label><input type="email" name="email" required>
-<button>Create customer</button>
-</form>
-</div>
-<div class="card">
-<h2>All customers</h2>
-<table><tr><th>Name</th><th>Email</th><th>Monitors</th><th>Status</th><th>Most recent activity</th></tr>{rows or '<tr><td colspan=5>No customers yet.</td></tr>'}</table>
-</div>
-""")
+    return HTMLResponse(pages.customers_page(now=utc_now(), customers=customers))
+
+
+@app.get("/customers/new", response_class=HTMLResponse)
+def new_customer():
+    return HTMLResponse(pages.customer_form_page())
 
 
 @app.post("/customers")
@@ -1106,13 +1080,20 @@ def create_customer(
     name: str = Form(...),
     email: str = Form(...),
 ):
+    values = {"name": name, "email": email}
+    errors: dict[str, str] = {}
     name = name.strip()
     if not name:
-        raise HTTPException(400, "Customer name is required.")
+        errors["name"] = "Enter the customer's name."
     try:
         email = validate_email_address(email)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        errors["email"] = str(exc)
+    if errors:
+        return HTMLResponse(
+            pages.customer_form_page(values=values, errors=errors),
+            status_code=400,
+        )
     with db() as conn:
         cursor = conn.execute(
             """
@@ -1125,101 +1106,48 @@ def create_customer(
     return RedirectResponse(f"/customer/{customer_id}", status_code=303)
 
 
-@app.get("/customer/{customer_id}", response_class=HTMLResponse)
-def customer_detail(
-    customer_id: int,
-    notice: str | None = None,
-):
+def _get_customer(customer_id: int) -> sqlite3.Row:
     with db() as conn:
         customer = conn.execute(
             "SELECT * FROM customers WHERE id=?",
             (customer_id,),
         ).fetchone()
-        targets = conn.execute(
-            """
-            SELECT target.*,
-                   (
-                       SELECT capture.created_at
-                       FROM captures capture
-                       WHERE capture.target_id=target.id
-                         AND (
-                             TRIM(COALESCE(capture.categories, '')) != ''
-                             OR TRIM(COALESCE(capture.structured_changes, ''))
-                                NOT IN ('', '[]')
-                         )
-                       ORDER BY capture.id DESC
-                       LIMIT 1
-                   ) AS latest_change_at,
-                   (
-                       SELECT capture.summary
-                       FROM captures capture
-                       WHERE capture.target_id=target.id
-                         AND (
-                             TRIM(COALESCE(capture.categories, '')) != ''
-                             OR TRIM(COALESCE(capture.structured_changes, ''))
-                                NOT IN ('', '[]')
-                         )
-                       ORDER BY capture.id DESC
-                       LIMIT 1
-                   ) AS latest_change_summary
-            FROM targets target
-            WHERE target.customer_id=?
-            ORDER BY target.id DESC
-            """,
-            (customer_id,),
-        ).fetchall()
     if customer is None:
-        raise HTTPException(404)
+        raise HTTPException(404, "This customer doesn't exist or was removed.")
+    return customer
 
-    active = bool(customer["active"])
-    status_class = "good" if active else "warning"
-    status_label = "Active" if active else "Inactive"
-    status_action = "Disable customer" if active else "Re-enable customer"
-    status_value = "0" if active else "1"
-    notice_message = (
-        f"<div class='card status good' role='status'>{_html(notice)}</div>"
-        if notice
-        else ""
-    )
-    rows = "".join(
-        _customer_target_row(
-            target,
-            customer_active=active,
-            customer_email=customer["email"],
+
+@app.get("/customer/{customer_id}", response_class=HTMLResponse)
+def customer_detail(
+    customer_id: int,
+    notice: str | None = None,
+):
+    now = utc_now()
+    customer = _get_customer(customer_id)
+    with db() as conn:
+        monitors = _load_monitors(conn, now=now, customer_id=customer_id)
+        feed = _load_feed(
+            conn,
+            limit=CUSTOMER_FEED_LIMIT,
+            customer_id=customer_id,
         )
-        for target in targets
+    return HTMLResponse(
+        pages.customer_page(
+            now=now,
+            customer=customer,
+            monitors=monitors,
+            feed=feed,
+            attention=_attention_items(monitors, now=now, include_customer=False),
+            notice=notice,
+        )
     )
-    return page_shell(f"""
-<p><a href="/customers">← Customers</a> · <a href="/">Dashboard</a></p>
-<h1>{_html(customer['name'])}</h1>
-<p>{_html(customer['email'])}</p>
-{notice_message}
-<div class="card">
-<h2>Customer status</h2>
-<p><span class="status {status_class}">{status_label}</span> · {len(targets)} monitored competitors</p>
-<form method="post" action="/customer/{customer_id}/status">
-<input type="hidden" name="active" value="{status_value}">
-<button>{status_action}</button>
-</form>
-</div>
-<div class="card">
-<h2>Add competitor monitor</h2>
-<p class="muted">Alerts default to {_html(customer['email'])}.</p>
-<form method="post" action="/customer/{customer_id}/targets">
-<label>Competitor name</label><input name="name" required>
-<label>Public URL</label><input name="url" placeholder="https://example.com/pricing" required>
-<div class="settings-grid">
-<div><label>Check frequency</label><select name="check_frequency">{_frequency_options('daily')}</select></div>
-<label class="wide"><input type="checkbox" name="enabled" value="yes" checked>Enable automatic monitoring</label>
-</div>
-<button>Add monitor</button>
-</form>
-</div>
-<div class="card">
-<h2>Monitored competitors</h2>
-<table><tr><th>Competitor</th><th>Monitoring</th><th>Alert recipient</th><th>Last check</th><th>Next check</th><th>Latest meaningful change</th><th></th></tr>{rows or '<tr><td colspan=7>No monitors yet.</td></tr>'}</table>
-</div>
-""")
+
+
+@app.get("/customer/{customer_id}/targets/new", response_class=HTMLResponse)
+def new_customer_target(customer_id: int):
+    return HTMLResponse(
+        pages.competitor_form_page(customer=_get_customer(customer_id))
+    )
 
 
 @app.post("/customer/{customer_id}/status")
@@ -1236,9 +1164,13 @@ def update_customer_status(
             (active_value, customer_id),
         )
     if updated.rowcount != 1:
-        raise HTTPException(404)
-    status = "re-enabled" if active_value else "disabled"
-    notice = quote(f"Customer {status}.", safe="")
+        raise HTTPException(404, "This customer doesn't exist or was removed.")
+    message = (
+        "Customer re-enabled. Scheduled scans and email alerts will resume."
+        if active_value
+        else "Customer disabled. Scheduled scans and email alerts are paused."
+    )
+    notice = quote(message, safe="")
     return RedirectResponse(
         f"/customer/{customer_id}?notice={notice}",
         status_code=303,
@@ -1250,19 +1182,49 @@ def _validated_optional_email(value: str) -> str | None:
     return validate_email_address(candidate) if candidate else None
 
 
-async def _validated_monitor_fields(
+async def _validated_monitor_form(
     name: str,
     url: str,
     check_frequency: str,
-) -> tuple[str, str, str]:
-    name = name.strip()
-    if not name:
-        raise ValueError("Name is required.")
-    return (
-        name,
-        await _validate_public_url_async(url),
-        validate_frequency(check_frequency),
-    )
+) -> tuple[tuple[str, str, str] | None, dict[str, str]]:
+    """Validate monitor fields, returning cleaned values or per-field errors."""
+    errors: dict[str, str] = {}
+    clean_name = name.strip()
+    if not clean_name:
+        errors["name"] = "Enter the competitor's name."
+    clean_url = ""
+    if not url.strip():
+        errors["url"] = "Enter the address of the page to monitor."
+    else:
+        try:
+            clean_url = await _validate_public_url_async(url)
+        except URLValidationError as exc:
+            errors["url"] = friendly_error(str(exc))
+    frequency = ""
+    try:
+        frequency = validate_frequency(check_frequency)
+    except ValueError as exc:
+        errors["check_frequency"] = str(exc)
+    if errors:
+        return None, errors
+    return (clean_name, clean_url, frequency), errors
+
+
+def _monitor_form_values(
+    *,
+    name: str,
+    url: str,
+    check_frequency: str,
+    enabled: str | None,
+    alert_email: str = "",
+) -> dict[str, str]:
+    return {
+        "name": name,
+        "url": url,
+        "check_frequency": check_frequency,
+        "enabled": "yes" if enabled is not None else "",
+        "alert_email": alert_email,
+    }
 
 
 def _record_check_failure(target_id: int, error: str) -> None:
@@ -1592,15 +1554,25 @@ async def create_target(
     alert_email: str = Form(""),
     check_frequency: str = Form("daily"),
 ):
+    cleaned, errors = await _validated_monitor_form(name, url, check_frequency)
+    recipient: str | None = None
     try:
-        name, url, frequency = await _validated_monitor_fields(
-            name,
-            url,
-            check_frequency,
-        )
         recipient = _validated_optional_email(alert_email)
-    except (URLValidationError, ValueError) as exc:
-        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        errors["alert_email"] = str(exc)
+    if cleaned is None or errors:
+        return _render_monitors(
+            form_values=_monitor_form_values(
+                name=name,
+                url=url,
+                check_frequency=check_frequency,
+                enabled=enabled,
+                alert_email=alert_email,
+            ),
+            form_errors=errors,
+            status_code=400,
+        )
+    name, url, frequency = cleaned
     with db() as conn:
         conn.execute(
             """
@@ -1623,7 +1595,8 @@ async def create_target(
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
-    return RedirectResponse("/", status_code=303)
+    notice = quote("Monitor added.", safe="")
+    return RedirectResponse(f"/monitors?notice={notice}", status_code=303)
 
 
 @app.post("/customer/{customer_id}/targets")
@@ -1634,21 +1607,23 @@ async def create_customer_target(
     enabled: str | None = Form(None),
     check_frequency: str = Form("daily"),
 ):
-    with db() as conn:
-        customer = conn.execute(
-            "SELECT email FROM customers WHERE id=?",
-            (customer_id,),
-        ).fetchone()
-    if customer is None:
-        raise HTTPException(404)
-    try:
-        name, url, frequency = await _validated_monitor_fields(
-            name,
-            url,
-            check_frequency,
+    customer = _get_customer(customer_id)
+    cleaned, errors = await _validated_monitor_form(name, url, check_frequency)
+    if cleaned is None:
+        return HTMLResponse(
+            pages.competitor_form_page(
+                customer=customer,
+                values=_monitor_form_values(
+                    name=name,
+                    url=url,
+                    check_frequency=check_frequency,
+                    enabled=enabled,
+                ),
+                errors=errors,
+            ),
+            status_code=400,
         )
-    except (URLValidationError, ValueError) as exc:
-        raise HTTPException(400, str(exc)) from exc
+    name, url, frequency = cleaned
     with db() as conn:
         conn.execute(
             """
@@ -1673,7 +1648,7 @@ async def create_customer_target(
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
-    notice = quote("Monitor added.", safe="")
+    notice = quote(f"{name} added. The first scan will capture a baseline.", safe="")
     return RedirectResponse(
         f"/customer/{customer_id}?notice={notice}",
         status_code=303,
@@ -1687,11 +1662,28 @@ def update_target_settings(
     alert_email: str = Form(""),
     check_frequency: str = Form("daily"),
 ):
+    errors: dict[str, str] = {}
+    recipient: str | None = None
+    frequency = check_frequency
     try:
         recipient = _validated_optional_email(alert_email)
+    except ValueError as exc:
+        errors["alert_email"] = str(exc)
+    try:
         frequency = validate_frequency(check_frequency)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        errors["check_frequency"] = str(exc)
+    if errors:
+        return _render_report(
+            target_id,
+            settings_values={
+                "alert_email": alert_email,
+                "check_frequency": check_frequency,
+                "enabled": "yes" if enabled is not None else "",
+            },
+            settings_errors=errors,
+            status_code=400,
+        )
     with db() as conn:
         updated = conn.execute(
             """
@@ -1707,7 +1699,7 @@ def update_target_settings(
             ),
         )
     if updated.rowcount != 1:
-        raise HTTPException(404)
+        raise HTTPException(404, MONITOR_NOT_FOUND)
     notice = quote("Monitoring settings saved.", safe="")
     return RedirectResponse(
         f"/target/{target_id}?notice={notice}",
@@ -1719,7 +1711,7 @@ def update_target_settings(
 async def check(target_id: int):
     result = await run_target_check(target_id)
     if result.status == "not_found":
-        raise HTTPException(404)
+        raise HTTPException(404, MONITOR_NOT_FOUND)
     if not result.completed:
         message = quote(result.error or "The check did not complete.", safe="")
         return RedirectResponse(
@@ -1728,99 +1720,84 @@ async def check(target_id: int):
         )
     return RedirectResponse(f"/target/{target_id}", status_code=303)
 
+
+MONITOR_NOT_FOUND = "This monitor doesn't exist or was removed."
+
+
+def _render_report(
+    target_id: int,
+    *,
+    error: str | None = None,
+    notice: str | None = None,
+    settings_values: dict[str, str] | None = None,
+    settings_errors: dict[str, str] | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    now = utc_now()
+    with db() as conn:
+        monitors = _load_monitors(conn, now=now, target_id=target_id)
+        if not monitors:
+            raise HTTPException(404, MONITOR_NOT_FOUND)
+        history = conn.execute(
+            """
+            SELECT id, created_at, visual_score, text_score, categories,
+                   structured_changes, alert_status, alert_recipient,
+                   alert_sent_at, alert_error, summary
+            FROM captures
+            WHERE target_id=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (target_id, HISTORY_LIMIT),
+        ).fetchall()
+        report = conn.execute(
+            f"""
+            SELECT capture.id, capture.created_at, capture.categories,
+                   capture.structured_changes, capture.alert_status,
+                   capture.alert_recipient, capture.alert_sent_at,
+                   capture.alert_error
+            FROM captures capture
+            WHERE capture.target_id=?
+              AND {CHANGES_CAPTURE}
+            ORDER BY capture.id DESC
+            LIMIT 1
+            """,
+            (target_id,),
+        ).fetchone()
+        newer_scans = (
+            conn.execute(
+                "SELECT COUNT(*) AS count FROM captures WHERE target_id=? AND id>?",
+                (target_id, report["id"]),
+            ).fetchone()["count"]
+            if report is not None
+            else 0
+        )
+    email_ready, email_error = _email_settings()
+    monitor = monitors[0]
+    return HTMLResponse(
+        pages.report_page(
+            now=now,
+            monitor=monitor,
+            history=history,
+            first_capture_id=monitor.first_capture_id,
+            report=report,
+            report_changes=_capture_changes(report) if report is not None else (),
+            newer_scans=int(newer_scans),
+            email_ready=email_ready,
+            email_error=email_error,
+            error=error,
+            notice=notice,
+            settings_values=settings_values,
+            settings_errors=settings_errors,
+        ),
+        status_code=status_code,
+    )
+
+
 @app.get("/target/{target_id}", response_class=HTMLResponse)
 def target_report(
     target_id: int,
     error: str | None = None,
     notice: str | None = None,
 ):
-    with db() as conn:
-        target = conn.execute(
-            """
-            SELECT target.*,
-                   customer.name AS customer_name,
-                   customer.email AS customer_email,
-                   customer.active AS customer_active
-            FROM targets target
-            LEFT JOIN customers customer ON customer.id=target.customer_id
-            WHERE target.id=?
-            """,
-            (target_id,),
-        ).fetchone()
-        caps = conn.execute("SELECT * FROM captures WHERE target_id=? ORDER BY id DESC LIMIT 20", (target_id,)).fetchall()
-    if not target:
-        raise HTTPException(404)
-    rows = "".join(
-        f"<tr><td>{_html(format_display_time(c['created_at']))}</td>"
-        f"<td>{_score_display(c['visual_score'])}</td>"
-        f"<td>{_score_display(c['text_score'])}</td>"
-        f"<td>{_html(c['categories'] or '—')}</td>"
-        f"<td>{_alert_display(c)}</td>"
-        f"<td>{_history_summary(c)}</td></tr>"
-        for c in caps
-    )
-    latest_changes = _latest_changes_panel(caps[0] if caps else None)
-    error_message = (
-        f"<div class='alert' role='alert'>{_html(error)}</div>" if error else ""
-    )
-    notice_message = (
-        f"<div class='card status good' role='status'>{_html(notice)}</div>"
-        if notice
-        else ""
-    )
-    check_error = (
-        f"<div class='alert' role='alert'><b>Last check failed:</b> "
-        f"{_html(target['last_check_error'])}</div>"
-        if target["last_check_error"] and not error
-        else ""
-    )
-    customer_line = (
-        f"<p>Customer: <a href='/customer/{target['customer_id']}'>"
-        f"{_html(target['customer_name'])}</a></p>"
-        if target["customer_id"] is not None
-        else ""
-    )
-    customer_email_help = (
-        f"<p class='muted'>Leave blank to use the customer email: "
-        f"{_html(target['customer_email'])}.</p>"
-        if target["customer_id"] is not None
-        else ""
-    )
-    customer_active = (
-        target["customer_id"] is None or bool(target["customer_active"])
-    )
-    return page_shell(f"""
-<p><a href="/">← Dashboard</a></p>
-<h1>{_html(target['name'])}</h1>
-<p><a href="{_html(target['url'])}" target="_blank" rel="noopener noreferrer">{_html(target['url'])}</a></p>
-{customer_line}
-{error_message}
-{notice_message}
-{check_error}
-<form method="post" action="/check/{target_id}"><button>Run check</button></form>
-<div class="card">
-<h2>Monitoring settings</h2>
-{_smtp_configuration_notice()}
-<form method="post" action="/target/{target_id}/settings">
-<div class="settings-grid">
-<div>
-<label>Alert email</label>
-<input type="email" name="alert_email" value="{_html(target['alert_email'] or '')}" placeholder="owner@example.com">
-{customer_email_help}
-</div>
-<div>
-<label>Check frequency</label>
-<select name="check_frequency">{_frequency_options(target['check_frequency'])}</select>
-</div>
-<label class="wide"><input type="checkbox" name="enabled" value="yes"{' checked' if target['enabled'] else ''}>Enable automatic monitoring</label>
-</div>
-<p class="muted">Last checked: {_html(format_display_time(target['last_check_at']) if target['last_check_at'] else 'Never')} · Next check: {_html(_next_check_display(target, customer_active=customer_active))}</p>
-<button>Save settings</button>
-</form>
-</div>
-{latest_changes}
-<div class="card">
-<h2>Change history</h2>
-<table><tr><th>Checked</th><th>Visual</th><th>Text</th><th>Category</th><th>Email alert</th><th>Summary</th></tr>{rows or '<tr><td colspan=6>No captures yet.</td></tr>'}</table>
-</div>
-""")
+    return _render_report(target_id, error=error, notice=notice)

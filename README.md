@@ -23,7 +23,7 @@ This is designed as a **managed-service MVP**. Do not add teams, complex billing
 - Browser requests and redirects are revalidated during capture.
 - Captures retry once after browser failures, do not require `networkidle`, and cap screenshots at 12,000 pixels high.
 - Navigation/footer boilerplate, scripts, styles, hidden content, and repeated text are excluded from text comparisons.
-- Failed checks are not stored as successful captures and show a useful message on the target report.
+- Failed checks are not stored as successful captures and show a useful message on the monitor's report.
 
 ## Local setup
 
@@ -77,22 +77,48 @@ targets that are not assigned to a customer continue to run normally.
 
 Set `DISPLAY_TIMEZONE=America/New_York` in `.env` to show UI and email times
 in that timezone. If unset or invalid, displayed times use UTC. Stored
-timestamps and monitoring schedules remain in UTC.
+timestamps and monitoring schedules remain in UTC. The page footer names the
+zone in plain language, for example "Times shown in Eastern Time."
 
 ## Operator customer onboarding
 
-Open `/customers` from the dashboard, then:
+Open **Customers** from the top navigation, then:
 
-1. Enter the customer's name and alert email and select **Create customer**.
-2. On the customer page, add each competitor name, public URL, check
-   frequency, and enabled/disabled setting.
-3. Confirm the customer's email in the **Alert recipient** column. The
-   customer page does not require re-entering it for each monitor.
-4. Use **Disable customer** to pause every scheduled monitor for that customer
-   while retaining all reports and history.
+1. Select **Create customer**, enter the customer's name and alert email, and
+   select **Create customer**.
+2. On the customer page, select **Add competitor** and enter the competitor
+   name, the page to monitor, and the scan frequency. The form shows which
+   email address will receive alerts; it defaults to the customer's email.
+3. Select **Scan now** on the new competitor's report to take the baseline
+   snapshot immediately, or let the scheduler take it on its next cycle.
+4. Use **Disable customer** (under **Customer controls** at the bottom of the
+   customer page) to pause every scheduled monitor for that customer while
+   retaining all reports and history.
 
-The original dashboard form still creates an unassigned monitor and keeps its
-explicit per-target alert email behavior.
+Monitors that are not assigned to a customer can still be created from
+**Monitors → Add a monitor without a customer**, which keeps the explicit
+per-monitor alert email behavior.
+
+## Interface
+
+The UI is server-rendered HTML with no frontend framework or build step:
+
+- **Overview** (`/`): a snapshot, recent meaningful changes across all
+  customers, the top items needing attention (paused customers aren't treated
+  as problems), and a compact monitoring overview.
+- **Customers** (`/customers`, `/customer/{id}`): customer list and detail with
+  that customer's changes, competitor pages, and controls.
+- **Monitors** (`/monitors`): every monitor across customers.
+- **Report** (`/target/{id}`): latest scan result, the most recent business
+  changes (kept visible after later no-change scans, and shown above the
+  failure notice when the newest scan failed), history, and monitoring
+  settings. Difference scores, delivery diagnostics, and original error
+  messages are under **Technical details**.
+
+Page rendering lives in `pages.py`, shared components and status vocabulary in
+`ui.py`, and the stylesheet in `static/app.css`. Invalid form input is shown
+inline on the form, and missing pages render an HTML error page instead of
+JSON.
 
 ## Email alerts
 
@@ -167,9 +193,10 @@ controlled after state:
 python seed_demo.py after
 ```
 
-Refresh the same report page to show the structured PRICE, SHIPPING,
-PROMOTION, and CTA changes. Demo targets are created with automatic monitoring
-disabled so the scheduler does not replace the deterministic fixture.
+Refresh the same report page to show the price, shipping, promotion, and
+call-to-action changes. Demo monitors are created with automatic monitoring
+disabled (shown as **Paused**) so the scheduler does not replace the
+deterministic fixture.
 
 ## Fastest launch model
 1. Create the customer once from the customer management page.
