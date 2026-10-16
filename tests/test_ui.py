@@ -38,9 +38,13 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(isolated_db):
+def client(isolated_db, monkeypatch):
     # Without a context manager the lifespan (and its scheduler) never starts.
-    return TestClient(app_module.app)
+    monkeypatch.setenv("ADMIN_USERNAME", "test-operator")
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-only-password")
+    client = TestClient(app_module.app)
+    client.auth = ("test-operator", "test-only-password")
+    return client
 
 
 def _customer(name="Acme Retail", email="owner@acme.example", active=True) -> int:
@@ -208,18 +212,18 @@ def test_friendly_error_translates_known_scan_failures() -> None:
 
 
 def test_empty_overview_invites_first_customer(client) -> None:
-    body = client.get("/").text
+    body = client.get("/app").text
 
     assert "Start monitoring your first competitor." in body
     assert "Create first customer" in body
-    assert 'href="/customers/new"' in body
+    assert 'href="/app/customers/new"' in body
     assert "No monitors yet." not in body
 
 
 def test_empty_lists_have_useful_empty_states(client) -> None:
-    assert "No customers yet." in client.get("/customers").text
+    assert "No customers yet." in client.get("/app/customers").text
     customer_id = _customer()
-    detail = client.get(f"/customer/{customer_id}").text
+    detail = client.get(f"/app/customer/{customer_id}").text
     assert "No competitor pages are being monitored for this customer yet." in detail
 
 
@@ -243,7 +247,7 @@ def test_report_keeps_latest_business_changes_after_no_change_scan(
     )
     _capture(target_id, "2026-01-03T00:00:00+00:00")
 
-    body = client.get(f"/target/{target_id}").text
+    body = client.get(f"/app/target/{target_id}").text
 
     latest_scan = body.index("No meaningful business changes detected.")
     business = body.index("Latest business changes")
@@ -266,11 +270,11 @@ def test_report_keeps_latest_business_changes_after_no_change_scan(
 def test_new_monitor_report_shows_first_scan_guidance(client) -> None:
     target_id = _target()
 
-    body = client.get(f"/target/{target_id}").text
+    body = client.get(f"/app/target/{target_id}").text
 
     assert "Not checked yet" in body
     assert "Setup needed" in body
-    assert 'action="/check/' in body
+    assert 'action="/app/check/' in body
     assert "Scan now" in body
 
 
@@ -281,9 +285,9 @@ def test_paused_customer_and_monitor_states_are_labelled(client) -> None:
     paused_target = _target(name="Disabled Rival", enabled=False)
     _capture(paused_target, "2026-01-01T00:00:00+00:00")
 
-    customer = client.get(f"/customer/{paused_customer}").text
-    report = client.get(f"/target/{customer_target}").text
-    disabled = client.get(f"/target/{paused_target}").text
+    customer = client.get(f"/app/customer/{paused_customer}").text
+    report = client.get(f"/app/target/{customer_target}").text
+    disabled = client.get(f"/app/target/{paused_target}").text
 
     assert "This customer is paused" in customer
     assert "Re-enable customer" in customer
@@ -313,7 +317,7 @@ def test_overview_lists_attention_and_recent_changes(client) -> None:
         alert_recipient="owner@acme.example",
     )
 
-    body = client.get("/").text
+    body = client.get("/app").text
 
     snapshot = body.index('id="snapshot-title"')
     changes = body.index('id="recent-changes-title"')
@@ -330,7 +334,7 @@ def test_overview_lists_attention_and_recent_changes(client) -> None:
 
 
 def test_invalid_customer_form_renders_inline_errors(client) -> None:
-    response = client.post("/customers", data={"name": " ", "email": "nope"})
+    response = client.post("/app/customers", data={"name": " ", "email": "nope"})
 
     assert response.status_code == 400
     assert response.headers["content-type"].startswith("text/html")
@@ -345,7 +349,7 @@ def test_invalid_competitor_url_renders_inline_error(client) -> None:
     customer_id = _customer()
 
     response = client.post(
-        f"/customer/{customer_id}/targets",
+        f"/app/customer/{customer_id}/targets",
         data={
             "name": "Rival",
             "url": "http://localhost/pricing",
@@ -367,7 +371,7 @@ def test_invalid_settings_are_not_saved_and_explain_why(client) -> None:
     target_id = _target(alert_email="old@example.com")
 
     response = client.post(
-        f"/target/{target_id}/settings",
+        f"/app/target/{target_id}/settings",
         data={"alert_email": "broken@", "check_frequency": "hourly"},
     )
 
@@ -383,14 +387,14 @@ def test_invalid_settings_are_not_saved_and_explain_why(client) -> None:
 
 
 def test_missing_resources_render_html_not_json(client) -> None:
-    for path in ("/customer/999", "/target/999", "/customer/abc", "/missing"):
+    for path in ("/app/customer/999", "/app/target/999", "/app/customer/abc", "/missing"):
         response = client.get(path)
         assert response.status_code == 404
         assert response.headers["content-type"].startswith("text/html")
         assert "Page not found" in response.text
         assert '"detail"' not in response.text
 
-    incomplete = client.post("/customers", data={"name": "Only a name"})
+    incomplete = client.post("/app/customers", data={"name": "Only a name"})
     assert incomplete.status_code == 422
     assert "Some information is missing" in incomplete.text
 
@@ -405,7 +409,7 @@ def test_unassigned_monitor_creation_redirects_to_monitors(
     monkeypatch.setattr(app_module, "_validate_public_url_async", validated)
 
     response = client.post(
-        "/targets",
+        "/app/targets",
         data={
             "name": "Benchmark",
             "url": "https://benchmark.example.com",
@@ -417,15 +421,15 @@ def test_unassigned_monitor_creation_redirects_to_monitors(
     )
 
     assert response.status_code == 303
-    assert unquote(response.headers["location"]) == "/monitors?notice=Monitor added."
-    assert "Benchmark" in client.get("/monitors").text
+    assert unquote(response.headers["location"]) == "/app/monitors?notice=Monitor added."
+    assert "Benchmark" in client.get("/app/monitors").text
 
 
 def test_layout_has_navigation_breadcrumbs_and_stylesheet(client) -> None:
     customer_id = _customer(name="Acme <Retail>")
     target_id = _target(customer_id=customer_id, name="Rival <One>")
 
-    body = client.get(f"/target/{target_id}").text
+    body = client.get(f"/app/target/{target_id}").text
 
     assert 'aria-label="Primary"' in body
     for label in ("Overview", "Customers", "Monitors"):
@@ -489,8 +493,8 @@ def test_failed_alert_stays_visible_after_newer_change_without_values(
         alert_status="not_applicable",
     )
 
-    overview = client.get("/").text
-    report = client.get(f"/target/{target_id}").text
+    overview = client.get("/app").text
+    report = client.get(f"/app/target/{target_id}").text
 
     assert "Email alert failed: Rival" in overview
     assert "Needs attention" in report.split('id="latest-scan-title"')[0]
@@ -548,13 +552,13 @@ def test_overview_previews_three_attention_items_and_skips_paused_customers(
         last_check_error="The hostname could not be resolved.",
     )
 
-    body = client.get("/").text
+    body = client.get("/app").text
     attention = _section_html(body, "attention")
 
     # Email setup (unset in tests) plus five failed scans: three are previewed.
     assert attention.count('class="attention-item ') == 3
     assert "3 more need attention." in attention
-    assert '<a href="/monitors">Review in Monitors</a>' in attention
+    assert '<a href="/app/monitors">Review in Monitors</a>' in attention
     assert "not shown" not in attention
     assert "Customer paused" not in body
     assert "Paused Rival" not in attention
@@ -565,7 +569,7 @@ def test_overview_previews_three_attention_items_and_skips_paused_customers(
             "UPDATE targets SET last_check_error=NULL WHERE id IN (?, ?)",
             tuple(failing[:2]),
         )
-    attention = _section_html(client.get("/").text, "attention")
+    attention = _section_html(client.get("/app").text, "attention")
     assert "1 more needs attention." in attention
 
 
@@ -574,7 +578,7 @@ def test_change_without_specific_values_reads_consistently(client) -> None:
     _capture(target_id, "2026-01-01T00:00:00+00:00", summary="Baseline capture created.")
     _capture(target_id, "2026-01-02T00:00:00+00:00", categories="CTA")
 
-    body = client.get(f"/target/{target_id}").text
+    body = client.get(f"/app/target/{target_id}").text
     latest = _section_html(body, "latest-scan-title")
 
     assert (
@@ -602,8 +606,8 @@ def test_business_changes_without_alert_attempt_say_email_not_sent(client) -> No
     )
     _capture(target_id, now.isoformat())
 
-    report = client.get(f"/target/{target_id}").text
-    overview = client.get("/").text
+    report = client.get(f"/app/target/{target_id}").text
+    overview = client.get("/app").text
 
     business = _section_html(report, "business-changes")
     assert ">Email not sent<" in business
@@ -642,7 +646,7 @@ def test_failed_latest_scan_keeps_retained_business_changes_first(client) -> Non
     )
     _capture(without_report, (now - timedelta(days=1)).isoformat())
 
-    body = client.get(f"/target/{target_id}").text
+    body = client.get(f"/app/target/{target_id}").text
 
     header = body.index('class="page-header"')
     business = body.index('id="business-changes-title"')
@@ -659,7 +663,7 @@ def test_failed_latest_scan_keeps_retained_business_changes_first(client) -> Non
     assert "below" not in _primary_content(callout)
 
     # Without retained business changes the failure stays first, full size.
-    other = client.get(f"/target/{without_report}").text
+    other = client.get(f"/app/target/{without_report}").text
     assert other.index('id="latest-scan-title"') < other.index(
         'id="business-changes-title"'
     )
@@ -676,7 +680,7 @@ def test_monitor_rows_state_a_failed_scan_once(client) -> None:
         last_check_error="The hostname could not be resolved.",
     )
 
-    for path in ("/monitors", f"/customer/{customer_id}"):
+    for path in ("/app/monitors", f"/app/customer/{customer_id}"):
         body = client.get(path).text
         row = re.search(r"<tr>\s*<td class=\"cell-primary\">.*?</tr>", body, re.S)
         assert row is not None
@@ -690,8 +694,8 @@ def test_email_setup_message_avoids_server_jargon(client) -> None:
     target_id = _target(name="Rival")
     _capture(target_id, "2026-01-01T00:00:00+00:00")
 
-    overview = _primary_content(client.get("/").text)
-    report = _primary_content(client.get(f"/target/{target_id}").text)
+    overview = _primary_content(client.get("/app").text)
+    report = _primary_content(client.get(f"/app/target/{target_id}").text)
 
     assert "Email alerts are unavailable" in overview
     assert "until email delivery is set up." in overview
@@ -723,10 +727,10 @@ def test_form_controls_meet_contrast_minimums() -> None:
 
 
 def test_footer_names_timezone_in_plain_language(client, monkeypatch) -> None:
-    assert "Times shown in UTC." in client.get("/").text
+    assert "Times shown in UTC." in client.get("/app").text
 
     monkeypatch.setenv("DISPLAY_TIMEZONE", "America/New_York")
-    body = client.get("/").text
+    body = client.get("/app").text
     footer = body[body.index('<footer class="app-footer">') :]
     assert "Times shown in Eastern Time." in footer
     assert "America" not in footer
@@ -773,7 +777,7 @@ def test_customer_page_orders_changes_problems_operations_controls(client) -> No
         alert_recipient="owner@acme.example",
     )
 
-    body = client.get(f"/customer/{customer_id}").text
+    body = client.get(f"/app/customer/{customer_id}").text
 
     positions = [
         body.index('class="page-header"'),

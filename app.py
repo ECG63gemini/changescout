@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import secrets
 import sqlite3
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -11,8 +12,9 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.security import HTTPBasic
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from dotenv import load_dotenv
@@ -120,8 +122,75 @@ async def lifespan(_: FastAPI):
             await scheduler_task
 
 
-app = FastAPI(title="ChangeScout", lifespan=lifespan)
+app = FastAPI(
+    title="ChangeScout",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+operator_basic = HTTPBasic(auto_error=False)
+
+
+@app.middleware("http")
+async def protect_operator(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    path = request.url.path
+    if path == "/app" or path.startswith("/app/"):
+        headers = {"Cache-Control": "no-store"}
+        username = os.getenv("ADMIN_USERNAME", "")
+        password = os.getenv("ADMIN_PASSWORD", "")
+        if not username.strip() or not password.strip():
+            return HTMLResponse(
+                "Operator access is unavailable: configure ADMIN_USERNAME and ADMIN_PASSWORD.",
+                status_code=503,
+                headers=headers,
+            )
+        try:
+            credentials = await operator_basic(request)
+        except HTTPException:
+            credentials = None
+        # Compare fixed-length digests without revealing credential lengths.
+        username_matches = secrets.compare_digest(
+            hashlib.sha256(
+                (credentials.username if credentials else "").encode("utf-8")
+            ).digest(),
+            hashlib.sha256(username.encode("utf-8")).digest(),
+        )
+        password_matches = secrets.compare_digest(
+            hashlib.sha256(
+                (credentials.password if credentials else "").encode("utf-8")
+            ).digest(),
+            hashlib.sha256(password.encode("utf-8")).digest(),
+        )
+        if not (credentials and username_matches and password_matches):
+            headers["WWW-Authenticate"] = 'Basic realm="ChangeScout operator"'
+            return HTMLResponse(
+                "Operator authentication required.",
+                status_code=401,
+                headers=headers,
+            )
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            origin = request.headers.get("origin")
+            if (
+                request.headers.get("sec-fetch-site") == "cross-site"
+                or (
+                    origin is not None
+                    and origin.rstrip("/") != str(request.base_url).rstrip("/")
+                )
+            ):
+                return HTMLResponse(
+                    "Cross-site operator actions are not allowed.",
+                    status_code=403,
+                    headers=headers,
+                )
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    return await call_next(request)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -153,7 +222,7 @@ async def validation_error_page(
     request: Request,
     _exc: RequestValidationError,
 ) -> HTMLResponse:
-    # Invalid path parameters (e.g. /customer/abc) are simply pages that don't exist.
+    # Invalid path parameters (e.g. /app/customer/abc) are pages that don't exist.
     if request.method in {"GET", "HEAD"}:
         return HTMLResponse(
             pages.error_page(
@@ -210,6 +279,17 @@ def init_db():
             email TEXT NOT NULL,
             created_at TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1
+        )
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS inquiries(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            business_name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            website TEXT,
+            message TEXT,
+            created_at TEXT NOT NULL
         )
         """)
         conn.execute("""
@@ -603,7 +683,7 @@ def _application_report_url(target_id: int) -> str | None:
             "APP_BASE_URL is invalid; alert emails will omit the report link."
         )
         return None
-    return f"{base_url}/target/{target_id}"
+    return f"{base_url}/app/target/{target_id}"
 
 
 def _clean_error(exc: Exception) -> str:
@@ -1004,7 +1084,95 @@ def _attention_items(
     return sorted(items, key=lambda item: item.priority)
 
 
+@app.get("/landing", response_class=HTMLResponse)
 @app.get("/", response_class=HTMLResponse)
+def landing(submitted: str | None = None):
+    return HTMLResponse(pages.landing_page(submitted=submitted == "1"))
+
+
+def _inquiry_website_error(value: str) -> str | None:
+    if not value:
+        return None
+    if len(value) > 2048:
+        return "Website must be 2,048 characters or fewer."
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+    except ValueError:
+        return "Enter a valid website address, including https://."
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not hostname
+        or any(character.isspace() for character in value)
+    ):
+        return "Enter a valid website address, including https://."
+    return None
+
+
+@app.post("/landing/contact")
+def create_inquiry(
+    name: str = Form(""),
+    business_name: str = Form(""),
+    email: str = Form(""),
+    website: str = Form(""),
+    message: str = Form(""),
+):
+    values = {
+        "name": name,
+        "business_name": business_name,
+        "email": email,
+        "website": website,
+        "message": message,
+    }
+    name = name.strip()
+    business_name = business_name.strip()
+    website = website.strip()
+    message = message.strip()
+    errors: dict[str, str] = {}
+    if not name:
+        errors["name"] = "Enter your name."
+    elif len(name) > 120:
+        errors["name"] = "Name must be 120 characters or fewer."
+    if not business_name:
+        errors["business_name"] = "Enter your business name."
+    elif len(business_name) > 160:
+        errors["business_name"] = "Business name must be 160 characters or fewer."
+    try:
+        email = validate_email_address(email)
+    except ValueError:
+        errors["email"] = "Enter a valid email address."
+    website_error = _inquiry_website_error(website)
+    if website_error:
+        errors["website"] = website_error
+    if len(message) > 2000:
+        errors["message"] = "Message must be 2,000 characters or fewer."
+    if errors:
+        return HTMLResponse(
+            pages.landing_page(values=values, errors=errors),
+            status_code=400,
+        )
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO inquiries(
+                name, business_name, email, website, message, created_at
+            )
+            VALUES(?,?,?,?,?,?)
+            """,
+            (
+                name,
+                business_name,
+                email,
+                website or None,
+                message or None,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+    return RedirectResponse("/?submitted=1#contact", status_code=303)
+
+
+@app.get("/app", response_class=HTMLResponse)
 def home():
     now = utc_now()
     with db() as conn:
@@ -1048,12 +1216,12 @@ def _render_monitors(
     )
 
 
-@app.get("/monitors", response_class=HTMLResponse)
+@app.get("/app/monitors", response_class=HTMLResponse)
 def monitor_list(notice: str | None = None):
     return _render_monitors(notice=notice)
 
 
-@app.get("/customers", response_class=HTMLResponse)
+@app.get("/app/customers", response_class=HTMLResponse)
 def customer_list():
     with db() as conn:
         customers = conn.execute(
@@ -1070,12 +1238,12 @@ def customer_list():
     return HTMLResponse(pages.customers_page(now=utc_now(), customers=customers))
 
 
-@app.get("/customers/new", response_class=HTMLResponse)
+@app.get("/app/customers/new", response_class=HTMLResponse)
 def new_customer():
     return HTMLResponse(pages.customer_form_page())
 
 
-@app.post("/customers")
+@app.post("/app/customers")
 def create_customer(
     name: str = Form(...),
     email: str = Form(...),
@@ -1103,7 +1271,7 @@ def create_customer(
             (name, email, datetime.now(timezone.utc).isoformat()),
         )
         customer_id = int(cursor.lastrowid)
-    return RedirectResponse(f"/customer/{customer_id}", status_code=303)
+    return RedirectResponse(f"/app/customer/{customer_id}", status_code=303)
 
 
 def _get_customer(customer_id: int) -> sqlite3.Row:
@@ -1117,7 +1285,7 @@ def _get_customer(customer_id: int) -> sqlite3.Row:
     return customer
 
 
-@app.get("/customer/{customer_id}", response_class=HTMLResponse)
+@app.get("/app/customer/{customer_id}", response_class=HTMLResponse)
 def customer_detail(
     customer_id: int,
     notice: str | None = None,
@@ -1143,14 +1311,14 @@ def customer_detail(
     )
 
 
-@app.get("/customer/{customer_id}/targets/new", response_class=HTMLResponse)
+@app.get("/app/customer/{customer_id}/targets/new", response_class=HTMLResponse)
 def new_customer_target(customer_id: int):
     return HTMLResponse(
         pages.competitor_form_page(customer=_get_customer(customer_id))
     )
 
 
-@app.post("/customer/{customer_id}/status")
+@app.post("/app/customer/{customer_id}/status")
 def update_customer_status(
     customer_id: int,
     active: str = Form(...),
@@ -1172,7 +1340,7 @@ def update_customer_status(
     )
     notice = quote(message, safe="")
     return RedirectResponse(
-        f"/customer/{customer_id}?notice={notice}",
+        f"/app/customer/{customer_id}?notice={notice}",
         status_code=303,
     )
 
@@ -1546,7 +1714,7 @@ async def scheduler_loop() -> None:
         await asyncio.sleep(SCHEDULER_POLL_SECONDS)
 
 
-@app.post("/targets")
+@app.post("/app/targets")
 async def create_target(
     name: str = Form(...),
     url: str = Form(...),
@@ -1596,10 +1764,10 @@ async def create_target(
             ),
         )
     notice = quote("Monitor added.", safe="")
-    return RedirectResponse(f"/monitors?notice={notice}", status_code=303)
+    return RedirectResponse(f"/app/monitors?notice={notice}", status_code=303)
 
 
-@app.post("/customer/{customer_id}/targets")
+@app.post("/app/customer/{customer_id}/targets")
 async def create_customer_target(
     customer_id: int,
     name: str = Form(...),
@@ -1650,12 +1818,12 @@ async def create_customer_target(
         )
     notice = quote(f"{name} added. The first scan will capture a baseline.", safe="")
     return RedirectResponse(
-        f"/customer/{customer_id}?notice={notice}",
+        f"/app/customer/{customer_id}?notice={notice}",
         status_code=303,
     )
 
 
-@app.post("/target/{target_id}/settings")
+@app.post("/app/target/{target_id}/settings")
 def update_target_settings(
     target_id: int,
     enabled: str | None = Form(None),
@@ -1702,12 +1870,12 @@ def update_target_settings(
         raise HTTPException(404, MONITOR_NOT_FOUND)
     notice = quote("Monitoring settings saved.", safe="")
     return RedirectResponse(
-        f"/target/{target_id}?notice={notice}",
+        f"/app/target/{target_id}?notice={notice}",
         status_code=303,
     )
 
 
-@app.post("/check/{target_id}")
+@app.post("/app/check/{target_id}")
 async def check(target_id: int):
     result = await run_target_check(target_id)
     if result.status == "not_found":
@@ -1715,10 +1883,10 @@ async def check(target_id: int):
     if not result.completed:
         message = quote(result.error or "The check did not complete.", safe="")
         return RedirectResponse(
-            f"/target/{target_id}?error={message}",
+            f"/app/target/{target_id}?error={message}",
             status_code=303,
         )
-    return RedirectResponse(f"/target/{target_id}", status_code=303)
+    return RedirectResponse(f"/app/target/{target_id}", status_code=303)
 
 
 MONITOR_NOT_FOUND = "This monitor doesn't exist or was removed."
@@ -1794,7 +1962,7 @@ def _render_report(
     )
 
 
-@app.get("/target/{target_id}", response_class=HTMLResponse)
+@app.get("/app/target/{target_id}", response_class=HTMLResponse)
 def target_report(
     target_id: int,
     error: str | None = None,

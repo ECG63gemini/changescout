@@ -11,6 +11,11 @@ from datetime import datetime, timedelta
 from display_time import format_display_time
 from monitoring import StructuredChange
 from ui import (
+    BRAND_MARK,
+    BUSY_SCRIPT,
+    CSS_VERSION,
+    FAVICON,
+    LANDING_CSS_VERSION,
     AttentionItem,
     FeedItem,
     MonitorView,
@@ -51,6 +56,7 @@ from ui import (
     status_badge,
     technical_list,
     text_field,
+    textarea_field,
     time_tag,
 )
 
@@ -65,6 +71,339 @@ def _need_attention_text(count: int) -> str:
 
 def _notice_banner(notice: str | None) -> str:
     return banner(h(notice), tone="success") if notice else ""
+
+
+# ---------------------------------------------------------------------------
+# Public landing page
+# ---------------------------------------------------------------------------
+
+
+MARKETING_CHECK_ICON = """<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+<path d="m5.5 10.2 2.8 2.8 6.2-6.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>"""
+
+WATCH_ITEMS = (
+    (
+        "Price changes",
+        "See when a listed price moves up or down.",
+        '<path d="M6 8.5h8M6 12h5M10 3.5v13M5.5 4.5h7l2 2v9h-9z"/>',
+    ),
+    (
+        "Promotions",
+        "Catch new discounts, sale language, and limited-time offers.",
+        '<path d="m5 5 10 10M7 14.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM13 8.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/>',
+    ),
+    (
+        "Shipping offers",
+        "Track free-shipping thresholds and delivery promises.",
+        '<path d="M3.5 6h8v7h-8zM11.5 8.5h2.7l2.3 2.3V13h-5z"/><circle cx="6" cy="14.5" r="1.5"/><circle cx="14" cy="14.5" r="1.5"/>',
+    ),
+    (
+        "Product changes",
+        "Know when products, bundles, or key details change.",
+        '<path d="m4 7 6-3 6 3v7l-6 3-6-3zM4 7l6 3 6-3M10 10v7"/>',
+    ),
+    (
+        "Calls to action",
+        "Notice changes in the actions competitors want shoppers to take.",
+        '<path d="m5 3.5 9.5 7-4.2 1.2-2.2 4.1z"/>',
+    ),
+    (
+        "Positioning and messaging",
+        "Follow changes to claims, value propositions, and market language.",
+        '<path d="M3.5 5.5h13v8h-8l-3.5 3v-3H3.5zM6.5 8.5h7M6.5 11h4"/>',
+    ),
+)
+
+REPORT_CHANGES = (
+    ("PRICE", "$99", "$79", "Down $20 (20.2%)"),
+    ("PROMOTION", "No promotion", "20% off this week", "New limited-time offer"),
+    (
+        "SHIPPING",
+        "Free shipping over $100",
+        "Free shipping over $50",
+        "Threshold lowered by $50",
+    ),
+    ("CTA", "Shop Now", "Start Shopping", "Primary call to action changed"),
+)
+
+
+def _marketing_document(content: str) -> str:
+    description = (
+        "ChangeScout monitors competitor websites for meaningful changes to "
+        "prices, promotions, products, shipping offers, and messaging."
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="{h(description)}">
+<title>Competitor website monitoring for small businesses · ChangeScout</title>
+<link rel="icon" href="{FAVICON}">
+<link rel="stylesheet" href="/static/app.css?v={CSS_VERSION}">
+<link rel="stylesheet" href="/static/landing.css?v={LANDING_CSS_VERSION}">
+</head>
+<body class="marketing-page">
+<a class="skip-link" href="#main">Skip to main content</a>
+<header class="marketing-header">
+<div class="marketing-shell marketing-header__inner">
+<a class="brand marketing-brand" href="/">{BRAND_MARK}<span class="brand__name">ChangeScout</span></a>
+<nav class="marketing-nav" aria-label="Primary">
+<a class="marketing-nav__link" href="#how-it-works">How it works</a>
+<a class="marketing-nav__link" href="#what-it-watches">What it watches</a>
+<a class="marketing-nav__link" href="#pricing">Pricing</a>
+<a class="btn btn--primary marketing-nav__cta" href="#contact">Start monitoring</a>
+</nav>
+</div>
+</header>
+<main id="main" tabindex="-1">
+{content}
+</main>
+<footer class="marketing-footer">
+<div class="marketing-shell marketing-footer__inner">
+<div>
+<a class="brand marketing-brand" href="/">{BRAND_MARK}<span class="brand__name">ChangeScout</span></a>
+<p>Meaningful competitor website changes, without the manual checking.</p>
+</div>
+<a href="#contact">Start monitoring competitors</a>
+</div>
+</footer>
+{BUSY_SCRIPT}
+</body>
+</html>"""
+
+
+def _watch_cards() -> str:
+    cards = []
+    for title, description, icon_path in WATCH_ITEMS:
+        cards.append(
+            f"""<article class="watch-card">
+<div class="watch-card__icon"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{icon_path}</svg></div>
+<div><h3>{h(title)}</h3><p>{h(description)}</p></div>
+</article>"""
+        )
+    return "".join(cards)
+
+
+def _report_cards() -> str:
+    cards = []
+    for category, old_value, new_value, detail in REPORT_CHANGES:
+        cards.append(
+            f"""<article class="report-change">
+<div class="report-change__heading"><span class="report-change__category">{h(category)}</span><span class="report-change__status">Changed</span></div>
+<div class="report-change__values">
+<div><span>Before</span><strong>{h(old_value)}</strong></div>
+<span class="report-change__arrow" aria-hidden="true">→</span>
+<div><span>Now</span><strong>{h(new_value)}</strong></div>
+</div>
+<p>{h(detail)}</p>
+</article>"""
+        )
+    return "".join(cards)
+
+
+def _inquiry_form(
+    values: Mapping[str, str],
+    errors: Mapping[str, str],
+) -> str:
+    field_ids = {
+        "name": "inquiry-name",
+        "business_name": "inquiry-business",
+        "email": "inquiry-email",
+        "website": "inquiry-website",
+        "message": "inquiry-message",
+    }
+    return f"""{form_error_summary(dict(errors), field_ids)}
+<form class="form marketing-form" method="post" action="/landing/contact" novalidate>
+<div class="marketing-form__row">
+{text_field(field_id="inquiry-name", name="name", label="Name", value=values.get("name", ""), required=True, placeholder="Alex Morgan", autocomplete="name", error=errors.get("name", ""), extra_attrs='maxlength="120"')}
+{text_field(field_id="inquiry-business", name="business_name", label="Business name", value=values.get("business_name", ""), required=True, placeholder="Northstar Goods", autocomplete="organization", error=errors.get("business_name", ""), extra_attrs='maxlength="160"')}
+</div>
+{text_field(field_id="inquiry-email", name="email", label="Email", value=values.get("email", ""), input_type="email", required=True, placeholder="alex@northstargoods.com", autocomplete="email", error=errors.get("email", ""), extra_attrs='maxlength="254"')}
+{text_field(field_id="inquiry-website", name="website", label="Website", value=values.get("website", ""), input_type="url", placeholder="https://northstargoods.com", autocomplete="url", error=errors.get("website", ""), extra_attrs='maxlength="2048" spellcheck="false"')}
+{textarea_field(field_id="inquiry-message", name="message", label="Message", value=values.get("message", ""), placeholder="Tell us what you would like to monitor.", error=errors.get("message", ""), rows=4, extra_attrs='maxlength="2000"')}
+<div class="form-actions marketing-form__actions">
+<button class="btn btn--primary" type="submit" data-busy-label="Sending...">Request a monitoring setup</button>
+</div>
+<p class="marketing-form__note">No payment or account is required. We will follow up about the pages you want monitored.</p>
+</form>"""
+
+
+def landing_page(
+    *,
+    submitted: bool = False,
+    values: Mapping[str, str] | None = None,
+    errors: Mapping[str, str] | None = None,
+) -> str:
+    values = values or {}
+    errors = errors or {}
+    contact_content = (
+        """<div class="marketing-success" role="status" tabindex="-1">
+<div class="marketing-success__icon">"""
+        + MARKETING_CHECK_ICON
+        + """</div>
+<div><h3>Thanks, your request is in.</h3>
+<p>We will follow up by email to learn which competitor pages matter most to your business.</p></div>
+</div>"""
+        if submitted
+        else _inquiry_form(values, errors)
+    )
+    content = f"""
+<section class="marketing-hero">
+<div class="marketing-shell marketing-hero__grid">
+<div class="marketing-hero__copy">
+<p class="marketing-eyebrow">Competitor monitoring for small businesses</p>
+<h1>Know when competitors change prices, promotions, products, or messaging.</h1>
+<p class="marketing-hero__lede">ChangeScout monitors competitor websites and alerts you when something that matters changes—so you don't have to keep checking them manually.</p>
+<div class="marketing-hero__actions">
+<a class="btn btn--primary marketing-btn--large" href="#contact">Start monitoring competitors</a>
+<a class="btn btn--secondary marketing-btn--large" href="#how-it-works">See how it works</a>
+</div>
+<ul class="marketing-proof" aria-label="Product highlights">
+<li>{MARKETING_CHECK_ICON}Managed setup</li>
+<li>{MARKETING_CHECK_ICON}Meaningful-change alerts</li>
+<li>{MARKETING_CHECK_ICON}No manual checking</li>
+</ul>
+</div>
+<div class="product-preview" aria-label="Example ChangeScout monitoring overview">
+<div class="product-preview__top">
+<div><span class="product-preview__kicker">Monitoring overview</span><strong>Competitor watchlist</strong></div>
+<span class="product-preview__live"><span></span>Active</span>
+</div>
+<div class="product-preview__summary">
+<div><strong>10</strong><span>pages monitored</span></div>
+<div><strong>3</strong><span>changes this week</span></div>
+</div>
+<div class="product-preview__alert">
+<div class="product-preview__alert-icon">↓</div>
+<div><span>Price change detected</span><strong>Northstar Classic Hoodie</strong><small>$99 → $79 · 18 minutes ago</small></div>
+</div>
+<div class="product-preview__row"><span>Rival Supply Co.</span><span class="preview-badge">Promotion</span></div>
+<div class="product-preview__row"><span>Harbor &amp; Pine</span><span class="preview-badge">Shipping</span></div>
+</div>
+</div>
+</section>
+
+<section class="marketing-section" id="how-it-works" aria-labelledby="how-it-works-title">
+<div class="marketing-shell">
+<div class="marketing-section__intro">
+<p class="marketing-eyebrow">How it works</p>
+<h2 id="how-it-works-title">Three steps from manual checks to useful alerts</h2>
+<p>Tell us which pages matter. ChangeScout handles the repeated checking and gives you the changes worth reviewing.</p>
+</div>
+<ol class="steps">
+<li><span class="steps__number">1</span><div><h3>Add competitor pages</h3><p>Choose the pricing, product, promotion, or home pages you want to follow.</p></div></li>
+<li><span class="steps__number">2</span><div><h3>ChangeScout scans them automatically</h3><p>Pages are checked on schedule and compared with their previous versions.</p></div></li>
+<li><span class="steps__number">3</span><div><h3>Get meaningful alerts when something changes</h3><p>Receive a clear record of the business changes that deserve your attention.</p></div></li>
+</ol>
+</div>
+</section>
+
+<section class="marketing-section marketing-section--tinted" id="what-it-watches" aria-labelledby="what-it-watches-title">
+<div class="marketing-shell">
+<div class="marketing-section__intro">
+<p class="marketing-eyebrow">What ChangeScout watches</p>
+<h2 id="what-it-watches-title">The competitor moves that affect your next decision</h2>
+<p>Focus on commercially meaningful updates instead of every small page edit.</p>
+</div>
+<div class="watch-grid">{_watch_cards()}</div>
+</div>
+</section>
+
+<section class="marketing-section" id="example-report" aria-labelledby="example-report-title">
+<div class="marketing-shell example-layout">
+<div class="example-copy">
+<p class="marketing-eyebrow">Example report</p>
+<h2 id="example-report-title">See what changed, not just that a page changed</h2>
+<p>Each alert turns page updates into a concise before-and-after record, so you can understand the move quickly.</p>
+<ul class="example-points">
+<li>{MARKETING_CHECK_ICON}<span><strong>Clear context</strong> for each detected change</span></li>
+<li>{MARKETING_CHECK_ICON}<span><strong>Before-and-after values</strong> in one place</span></li>
+<li>{MARKETING_CHECK_ICON}<span><strong>A saved history</strong> you can review later</span></li>
+</ul>
+</div>
+<div class="report-demo">
+<div class="report-demo__header">
+<div><span class="report-demo__eyebrow">Change report</span><h3>Northstar Goods</h3><p>4 meaningful changes detected</p></div>
+<span class="report-demo__date">Today, 9:42 AM</span>
+</div>
+<div class="report-demo__changes">{_report_cards()}</div>
+<p class="report-demo__note">Marketing example only. No live customer or monitoring data is shown.</p>
+</div>
+</div>
+</section>
+
+<section class="marketing-section marketing-section--tinted" id="benefits" aria-labelledby="benefits-title">
+<div class="marketing-shell">
+<div class="marketing-section__intro">
+<p class="marketing-eyebrow">Why businesses use it</p>
+<h2 id="benefits-title">Spend less time watching and more time responding</h2>
+</div>
+<div class="benefit-grid">
+<article><span>01</span><h3>Save time</h3><p>Turn a repetitive research task into a quick review of meaningful updates.</p></article>
+<article><span>02</span><h3>Stop checking manually</h3><p>Let scheduled monitoring replace bookmarks, spreadsheets, and repeated site visits.</p></article>
+<article><span>03</span><h3>React faster</h3><p>See competitor moves sooner, while there is still time to adjust your offer or message.</p></article>
+<article><span>04</span><h3>Keep a record</h3><p>Build a useful history of the price, promotion, product, shipping, and messaging changes that mattered.</p></article>
+</div>
+</div>
+</section>
+
+<section class="marketing-section" id="pricing" aria-labelledby="pricing-title">
+<div class="marketing-shell">
+<div class="marketing-section__intro marketing-section__intro--center">
+<p class="marketing-eyebrow">Simple pricing</p>
+<h2 id="pricing-title">Choose the monitoring cadence that fits your business</h2>
+<p>Every plan includes managed setup, so you can start with the right competitor pages.</p>
+</div>
+<div class="pricing-grid">
+<article class="pricing-card pricing-card--featured">
+<p class="pricing-card__badge">Best place to start</p>
+<h3>Founding Customer</h3>
+<p class="pricing-card__price"><strong>$29</strong><span>/month</span></p>
+<p class="pricing-card__description">Daily competitor monitoring for small teams getting started.</p>
+<ul>
+<li>{MARKETING_CHECK_ICON}up to 10 competitor pages</li>
+<li>{MARKETING_CHECK_ICON}daily monitoring</li>
+<li>{MARKETING_CHECK_ICON}meaningful-change email alerts</li>
+<li>{MARKETING_CHECK_ICON}managed setup</li>
+</ul>
+<a class="btn btn--primary" href="#contact">Start with Founding Customer</a>
+</article>
+<article class="pricing-card">
+<p class="pricing-card__badge pricing-card__badge--quiet">More coverage</p>
+<h3>Growth</h3>
+<p class="pricing-card__price"><strong>$59</strong><span>/month</span></p>
+<p class="pricing-card__description">More pages and faster checks for a growing operation.</p>
+<ul>
+<li>{MARKETING_CHECK_ICON}up to 25 competitor pages</li>
+<li>{MARKETING_CHECK_ICON}checks up to every 6 hours</li>
+<li>{MARKETING_CHECK_ICON}meaningful-change email alerts</li>
+<li>{MARKETING_CHECK_ICON}managed setup</li>
+</ul>
+<a class="btn btn--secondary" href="#contact">Choose Growth</a>
+</article>
+</div>
+<p class="pricing-note">No self-serve billing yet. Send a request below and we will help you get started.</p>
+</div>
+</section>
+
+<section class="contact-section" id="contact" aria-labelledby="contact-title">
+<div class="marketing-shell contact-layout">
+<div class="contact-copy">
+<p class="marketing-eyebrow">Start monitoring</p>
+<h2 id="contact-title">Tell us which competitors you want to watch</h2>
+<p>Share a few details and we will follow up about a simple monitoring setup for your business.</p>
+<div class="contact-assurance">
+<div>{MARKETING_CHECK_ICON}<span><strong>Managed setup</strong><small>We help select and configure the right pages.</small></span></div>
+<div>{MARKETING_CHECK_ICON}<span><strong>No account needed</strong><small>This request does not create an account or start billing.</small></span></div>
+</div>
+</div>
+<div class="contact-card">{contact_content}</div>
+</div>
+</section>
+"""
+    return _marketing_document(content)
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +423,7 @@ def overview_page(
     header = page_header(
         "Overview",
         description="Meaningful competitor changes across all customers.",
-        actions=link_button("Add customer", "/customers/new", "primary"),
+        actions=link_button("Add customer", "/app/customers/new", "primary"),
     )
     if customers_total == 0 and not monitors:
         content = header + empty_state(
@@ -92,14 +431,14 @@ def overview_page(
             "Create a customer, add a competitor page, and capture an initial "
             "baseline. ChangeScout will then monitor the page automatically and "
             "email meaningful changes.",
-            link_button("Create first customer", "/customers/new", "primary"),
+            link_button("Create first customer", "/app/customers/new", "primary"),
             hero=True,
         )
         return render_document(
             title="Overview",
             content=content,
             active="overview",
-            current_href="/",
+            current_href="/app",
         )
 
     active_monitors = sum(1 for monitor in monitors if monitor.active)
@@ -122,7 +461,7 @@ def overview_page(
         more_html = (
             f'<p class="section__footer">{more} more '
             f"{'needs' if more == 1 else 'need'} attention. "
-            '<a href="/monitors">Review in Monitors</a></p>'
+            '<a href="/app/monitors">Review in Monitors</a></p>'
             if more
             else ""
         )
@@ -158,14 +497,14 @@ def overview_page(
         )
         aside = link_button(
             f"View all {plural(len(monitors), 'monitor')}",
-            "/monitors",
+            "/app/monitors",
             "tertiary",
         )
     else:
         monitors_body = empty_state(
             "No competitor pages are being monitored yet.",
             "Open a customer and add a competitor page to start monitoring.",
-            link_button("View customers", "/customers", "secondary"),
+            link_button("View customers", "/app/customers", "secondary"),
         )
         aside = ""
     monitoring_html = section(
@@ -179,7 +518,7 @@ def overview_page(
         title="Overview",
         content=header + stats + changes_html + attention_html + monitoring_html,
         active="overview",
-        current_href="/",
+        current_href="/app",
     )
 
 
@@ -196,7 +535,7 @@ def _legacy_monitor_form(values: Mapping[str, str], errors: Mapping[str, str]) -
         "check_frequency": "monitor-frequency",
     }
     return f"""{form_error_summary(dict(errors), field_ids)}
-<form class="form" method="post" action="/targets" novalidate>
+<form class="form" method="post" action="/app/targets" novalidate>
 {text_field(field_id="monitor-name", name="name", label="Competitor name", value=values.get("name", ""), required=True, error=errors.get("name", ""), placeholder="Northstar Outfitters", autocomplete="off")}
 {text_field(field_id="monitor-url", name="url", label="Page to monitor", value=values.get("url", ""), input_type="url", required=True, error=errors.get("url", ""), placeholder="https://competitor.com/pricing", hint="Use the full public address, including https://.", autocomplete="url", extra_attrs='spellcheck="false"')}
 {text_field(field_id="monitor-alert-email", name="alert_email", label="Alert email", value=values.get("alert_email", ""), input_type="email", error=errors.get("alert_email", ""), placeholder="owner@example.com", hint="Needed to receive email alerts for this page.", autocomplete="email")}
@@ -228,7 +567,7 @@ def monitors_page(
         "Monitors",
         description=(
             "Every competitor page ChangeScout scans, across all customers. "
-            'To add a page for a customer, open it from <a href="/customers">Customers</a>.'
+            'To add a page for a customer, open it from <a href="/app/customers">Customers</a>.'
         ),
         meta=facts(h(item) for item in counts) if monitors else "",
     )
@@ -244,7 +583,7 @@ def monitors_page(
             "No competitor pages are being monitored yet.",
             "Open a customer and add a competitor page. ChangeScout takes a "
             "baseline snapshot, then scans the page on a schedule.",
-            link_button("View customers", "/customers", "primary"),
+            link_button("View customers", "/app/customers", "primary"),
         )
     legacy = (
         '<section class="section" id="add-monitor" aria-label="Add a monitor without a customer">'
@@ -262,7 +601,7 @@ def monitors_page(
         title="Monitors",
         content=_notice_banner(notice) + header + body + legacy,
         active="monitors",
-        current_href="/monitors",
+        current_href="/app/monitors",
     )
 
 
@@ -275,19 +614,19 @@ def customers_page(*, now: datetime, customers: Sequence[sqlite3.Row]) -> str:
     header = page_header(
         "Customers",
         description="Businesses you monitor competitors for.",
-        actions=link_button("Create customer", "/customers/new", "primary"),
+        actions=link_button("Create customer", "/app/customers/new", "primary"),
     )
     if not customers:
         body = empty_state(
             "No customers yet.",
             "Create your first customer to begin monitoring competitors.",
-            link_button("Create customer", "/customers/new", "primary"),
+            link_button("Create customer", "/app/customers/new", "primary"),
         )
         return render_document(
             title="Customers",
             content=header + body,
             active="customers",
-            current_href="/customers",
+            current_href="/app/customers",
         )
     rows = []
     for customer in customers:
@@ -298,11 +637,11 @@ def customers_page(*, now: datetime, customers: Sequence[sqlite3.Row]) -> str:
         )
         rows.append(
             f"""<tr>
-<td class="cell-primary"><a class="cell-title" href="/customer/{customer['id']}">{h(customer['name'])}</a><p class="cell-sub cell-email">{h(customer['email'])}</p></td>
+<td class="cell-primary"><a class="cell-title" href="/app/customer/{customer['id']}">{h(customer['name'])}</a><p class="cell-sub cell-email">{h(customer['email'])}</p></td>
 <td data-label="Status">{status_badge(customer_status(bool(customer['active'])))}</td>
 <td>{customer['monitor_count']}</td>
 <td data-label="Last activity" class="num">{activity}</td>
-<td class="cell-action"><a class="btn btn--tertiary btn--sm" href="/customer/{customer['id']}">View customer<span class="visually-hidden">: {h(customer['name'])}</span></a></td>
+<td class="cell-action"><a class="btn btn--tertiary btn--sm" href="/app/customer/{customer['id']}">View customer<span class="visually-hidden">: {h(customer['name'])}</span></a></td>
 </tr>"""
         )
     table = f"""<div class="card card--flush">
@@ -316,7 +655,7 @@ def customers_page(*, now: datetime, customers: Sequence[sqlite3.Row]) -> str:
         title="Customers",
         content=header + table,
         active="customers",
-        current_href="/customers",
+        current_href="/app/customers",
     )
 
 
@@ -331,12 +670,12 @@ def customer_form_page(
     form = f"""<div class="form-layout">
 {form_error_summary(dict(errors), field_ids)}
 <div class="card">
-<form class="form" method="post" action="/customers" novalidate>
+<form class="form" method="post" action="/app/customers" novalidate>
 {text_field(field_id="customer-name", name="name", label="Customer name", value=values.get("name", ""), required=True, error=errors.get("name", ""), placeholder="Acme Retail", autocomplete="organization")}
 {text_field(field_id="customer-email", name="email", label="Alert email", value=values.get("email", ""), input_type="email", required=True, error=errors.get("email", ""), placeholder="owner@acme.com", hint="Meaningful change alerts for this customer's competitor pages are sent here.", autocomplete="email")}
 <div class="form-actions">
 <button class="btn btn--primary" type="submit" data-busy-label="Creating…">Create customer</button>
-{link_button("Cancel", "/customers", "secondary")}
+{link_button("Cancel", "/app/customers", "secondary")}
 </div>
 </form>
 </div>
@@ -352,7 +691,7 @@ def customer_form_page(
         title="Create customer",
         content=header + form,
         active="customers",
-        crumbs=(("Customers", "/customers"), ("New customer", None)),
+        crumbs=(("Customers", "/app/customers"), ("New customer", None)),
     )
 
 
@@ -368,8 +707,8 @@ def customer_page(
     customer_id = customer["id"]
     active = bool(customer["active"])
     name = customer["name"]
-    add_href = f"/customer/{customer_id}/targets/new"
-    status_action = f"/customer/{customer_id}/status"
+    add_href = f"/app/customer/{customer_id}/targets/new"
+    status_action = f"/app/customer/{customer_id}/status"
 
     paused_banner = ""
     if not active:
@@ -492,7 +831,7 @@ def customer_page(
             + controls_html
         ),
         active="customers",
-        crumbs=(("Customers", "/customers"), (name, None)),
+        crumbs=(("Customers", "/app/customers"), (name, None)),
     )
 
 
@@ -523,7 +862,7 @@ def competitor_form_page(
 {form_error_summary(dict(errors), field_ids)}
 {paused_note}
 <div class="card">
-<form class="form" method="post" action="/customer/{customer_id}/targets" novalidate>
+<form class="form" method="post" action="/app/customer/{customer_id}/targets" novalidate>
 {text_field(field_id="competitor-name", name="name", label="Competitor name", value=values.get("name", ""), required=True, error=errors.get("name", ""), placeholder="Northstar Outfitters", autocomplete="off")}
 {text_field(field_id="competitor-url", name="url", label="Page to monitor", value=values.get("url", ""), input_type="url", required=True, error=errors.get("url", ""), placeholder="https://competitor.com/pricing", hint="Use the full public address, including https://. Pricing, product, and promotion pages work best.", autocomplete="url", extra_attrs='spellcheck="false"')}
 <div class="form-row">
@@ -536,7 +875,7 @@ def competitor_form_page(
 </div>
 <div class="form-actions">
 <button class="btn btn--primary" type="submit" data-busy-label="Adding…">Add competitor</button>
-{link_button("Cancel", f"/customer/{customer_id}", "secondary")}
+{link_button("Cancel", f"/app/customer/{customer_id}", "secondary")}
 </div>
 </form>
 </div>
@@ -553,8 +892,8 @@ def competitor_form_page(
         content=header + form,
         active="customers",
         crumbs=(
-            ("Customers", "/customers"),
-            (customer["name"], f"/customer/{customer_id}"),
+            ("Customers", "/app/customers"),
+            (customer["name"], f"/app/customer/{customer_id}"),
             ("Add competitor", None),
         ),
     )
@@ -856,7 +1195,7 @@ def _settings_section(
     )
     form = f"""{form_error_summary(dict(errors), field_ids)}
 <div class="card">
-<form class="form settings-form" method="post" action="/target/{monitor.id}/settings" novalidate>
+<form class="form settings-form" method="post" action="/app/target/{monitor.id}/settings" novalidate>
 <div class="settings-grid">
 <fieldset class="fieldset">
 <legend class="fieldset__legend">Monitoring</legend>
@@ -903,13 +1242,13 @@ def report_page(
     assigned = monitor.customer_id is not None
     if assigned:
         crumbs = (
-            ("Customers", "/customers"),
-            (monitor.customer_name or "Customer", f"/customer/{monitor.customer_id}"),
+            ("Customers", "/app/customers"),
+            (monitor.customer_name or "Customer", f"/app/customer/{monitor.customer_id}"),
             (monitor.name, None),
         )
         active = "customers"
     else:
-        crumbs = (("Monitors", "/monitors"), (monitor.name, None))
+        crumbs = (("Monitors", "/app/monitors"), (monitor.name, None))
         active = "monitors"
 
     banners = _notice_banner(notice)
@@ -926,7 +1265,7 @@ def report_page(
     subtitle_parts = []
     if assigned:
         subtitle_parts.append(
-            f'for <a href="/customer/{monitor.customer_id}">{h(monitor.customer_name)}</a>'
+            f'for <a href="/app/customer/{monitor.customer_id}">{h(monitor.customer_name)}</a>'
         )
     else:
         subtitle_parts.append('<span class="muted">No customer assigned</span>')
@@ -956,7 +1295,7 @@ def report_page(
         title_badges=status_badge(monitor.status),
         meta=subtitle + meta,
         actions=post_button(
-            f"/check/{monitor.id}",
+            f"/app/check/{monitor.id}",
             "Scan now",
             variant="primary",
             busy_label="Scanning…",
@@ -1012,8 +1351,8 @@ def report_page(
 def error_page(*, title: str, message: str) -> str:
     content = page_header(title, description=h(message)) + (
         '<div class="button-row">'
-        + link_button("Go to Overview", "/", "primary")
-        + link_button("View customers", "/customers", "secondary")
+        + link_button("Go to Overview", "/app", "primary")
+        + link_button("View customers", "/app/customers", "secondary")
         + "</div>"
     )
     return render_document(title=title, content=content)

@@ -201,7 +201,7 @@ def main() -> None:
     init_db()
     target_id = seed_before() if args.state == "before" else seed_after()
     print(f"Demo state '{args.state}' is ready.")
-    print(f"Open http://127.0.0.1:8000/target/{target_id}")
+    print(f"Open http://127.0.0.1:8000/app/target/{target_id}")
 
 
 if __name__ == "__main__":

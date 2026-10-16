@@ -110,7 +110,7 @@ def test_failed_capture_redirects_to_a_useful_escaped_message(
 
     assert response.status_code == 303
     location = response.headers["location"]
-    assert location.startswith(f"/target/{target_id}?error=")
+    assert location.startswith(f"/app/target/{target_id}?error=")
     assert "timed out" in unquote(location)
 
     with app_module.db() as conn:

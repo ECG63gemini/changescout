@@ -39,6 +39,7 @@ def _asset_version(name: str) -> str:
 
 
 CSS_VERSION = _asset_version("app.css")
+LANDING_CSS_VERSION = _asset_version("landing.css")
 
 
 def h(value: object) -> str:
@@ -614,9 +615,9 @@ def page_link(url: str, *, show_path: bool = True) -> str:
 # ---------------------------------------------------------------------------
 
 NAV_ITEMS = (
-    ("overview", "Overview", "/"),
-    ("customers", "Customers", "/customers"),
-    ("monitors", "Monitors", "/monitors"),
+    ("overview", "Overview", "/app"),
+    ("customers", "Customers", "/app/customers"),
+    ("monitors", "Monitors", "/app/monitors"),
 )
 
 FAVICON = (
@@ -710,7 +711,7 @@ def render_document(
 <a class="skip-link" href="#main">Skip to main content</a>
 <header class="app-header">
 <div class="container app-header__inner">
-<a class="brand" href="/">{BRAND_MARK}<span class="brand__name">ChangeScout</span></a>
+<a class="brand" href="/app">{BRAND_MARK}<span class="brand__name">ChangeScout</span></a>
 <nav class="app-nav" aria-label="Primary"><ul class="app-nav__list">{"".join(nav_links)}</ul></nav>
 </div>
 </header>
@@ -914,6 +915,40 @@ def text_field(
 </div>"""
 
 
+def textarea_field(
+    *,
+    field_id: str,
+    name: str,
+    label: str,
+    value: str = "",
+    required: bool = False,
+    hint: str = "",
+    error: str = "",
+    placeholder: str = "",
+    rows: int = 5,
+    extra_attrs: str = "",
+) -> str:
+    aria, hint_html, error_html = _described_by(field_id, hint, error)
+    optional = "" if required else ' <span class="field__optional">(optional)</span>'
+    attributes = [
+        f'id="{h(field_id)}"',
+        f'name="{h(name)}"',
+        f'rows="{rows}"',
+        'class="input input--textarea"',
+    ]
+    if required:
+        attributes.append("required")
+    if placeholder:
+        attributes.append(f'placeholder="{h(placeholder)}"')
+    if extra_attrs:
+        attributes.append(extra_attrs)
+    return f"""<div class="field{' field--invalid' if error else ''}">
+<label class="field__label" for="{h(field_id)}">{h(label)}{optional}</label>
+<textarea {" ".join(attributes)}{aria}>{h(value)}</textarea>
+{hint_html}{error_html}
+</div>"""
+
+
 def frequency_field(
     *,
     field_id: str,
@@ -1089,7 +1124,7 @@ def feed_card(
     if show_customer:
         if item.customer_id is not None:
             context = (
-                f'<p class="feed-item__context">for <a href="/customer/{item.customer_id}">'
+                f'<p class="feed-item__context">for <a href="/app/customer/{item.customer_id}">'
                 f"{h(item.customer_name or 'Unnamed customer')}</a></p>"
             )
         else:
@@ -1129,7 +1164,7 @@ def feed_card(
         ) + "</div>"
     return f"""<li class="feed-item">
 <div class="feed-item__who">
-<h3 class="feed-item__title"><a href="/target/{item.target_id}">{h(item.competitor)}</a></h3>
+<h3 class="feed-item__title"><a href="/app/target/{item.target_id}">{h(item.competitor)}</a></h3>
 {context}
 <p class="feed-item__time">{time_tag(item.detected_at, now=now)}</p>
 </div>
@@ -1139,7 +1174,7 @@ def feed_card(
 </div>
 <div class="feed-item__meta">
 <p class="feed-item__alert"><span class="meta-label">Alert</span> {status_badge(alert)}</p>
-<a class="btn btn--secondary btn--sm" href="/target/{item.target_id}">View report<span class="visually-hidden"> for {h(item.competitor)}</span></a>
+<a class="btn btn--secondary btn--sm" href="/app/target/{item.target_id}">View report<span class="visually-hidden"> for {h(item.competitor)}</span></a>
 </div>
 {technical_html}
 </li>"""
@@ -1218,7 +1253,7 @@ def monitor_attention(
                     f"{_attention_meta(attempted, customer)}"
                 ),
                 action=post_button(
-                    f"/check/{monitor.id}",
+                    f"/app/check/{monitor.id}",
                     "Retry scan",
                     busy_label="Scanning…",
                 ),
@@ -1235,7 +1270,7 @@ def monitor_attention(
                     f"compared with it.{_attention_meta(customer)}"
                 ),
                 action=post_button(
-                    f"/check/{monitor.id}",
+                    f"/app/check/{monitor.id}",
                     "Scan now",
                     busy_label="Scanning…",
                 ),
@@ -1254,18 +1289,18 @@ def monitor_attention(
         if alert == "no_recipient":
             title = f"No alert recipient: {monitor.name}"
             body = f"The email alert{detected} wasn't sent because no recipient is set."
-            action = link_button("Add recipient", f"/target/{monitor.id}#settings")
+            action = link_button("Add recipient", f"/app/target/{monitor.id}#settings")
         elif alert == "indeterminate":
             title = f"Alert delivery unknown: {monitor.name}"
             body = (
                 "ChangeScout restarted while sending the email alert"
                 f"{detected}, so delivery couldn't be confirmed."
             )
-            action = link_button("View report", f"/target/{monitor.id}")
+            action = link_button("View report", f"/app/target/{monitor.id}")
         else:
             title = f"Email alert failed: {monitor.name}"
             body = f"The email alert{detected} couldn't be delivered."
-            action = link_button("View report", f"/target/{monitor.id}")
+            action = link_button("View report", f"/app/target/{monitor.id}")
         items.append(
             AttentionItem(
                 title=title,
@@ -1313,7 +1348,7 @@ def monitor_rows(
         customer_cell = ""
         if show_customer:
             customer_html = (
-                f'<a class="cell-customer" href="/customer/{monitor.customer_id}" '
+                f'<a class="cell-customer" href="/app/customer/{monitor.customer_id}" '
                 f'title="{h(monitor.customer_name)}">{h(monitor.customer_name)}</a>'
                 if monitor.customer_id is not None
                 else '<span class="muted">No customer</span>'
@@ -1334,14 +1369,14 @@ def monitor_rows(
         )
         rows.append(
             f"""<tr>
-<td class="cell-primary"><a class="cell-title" href="/target/{monitor.id}">{h(monitor.name)}</a>
+<td class="cell-primary"><a class="cell-title" href="/app/target/{monitor.id}">{h(monitor.name)}</a>
 <p class="cell-sub">{page_link(monitor.url)}</p>{override}</td>
 {customer_cell}
 <td data-label="Status">{status_badge(monitor.status)}{status_sub}</td>
 <td data-label="Latest result"><span class="result{result_class}">{h(monitor.result.label)}</span>{result_sub}</td>
 <td data-label="Last checked" class="num">{last_checked_html(monitor.last_check_at, now=now)}</td>
 <td data-label="Next check" class="num">{next_check_html(monitor.next_check, now=now)}</td>
-<td class="cell-action"><a class="btn btn--tertiary btn--sm" href="/target/{monitor.id}">View report<span class="visually-hidden"> for {h(monitor.name)}</span></a></td>
+<td class="cell-action"><a class="btn btn--tertiary btn--sm" href="/app/target/{monitor.id}">View report<span class="visually-hidden"> for {h(monitor.name)}</span></a></td>
 </tr>"""
         )
     return "".join(rows)

@@ -358,6 +358,7 @@ def test_scheduler_rereads_target_state_before_each_check(
 def test_meaningful_change_sends_one_alert(tmp_path, monkeypatch) -> None:
     _use_test_database(tmp_path, monkeypatch)
     _configure_smtp(monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "https://changescout.example/")
     target_id = _insert_target()
     _insert_capture(target_id, _demo_text("before"))
     sent: list[tuple[SMTPSettings, str, str, str]] = []
@@ -401,6 +402,7 @@ def test_meaningful_change_sends_one_alert(tmp_path, monkeypatch) -> None:
     assert sent[0][1] == "owner@example.com"
     assert "important changes at Example Competitor" in sent[0][2]
     assert "$99 -> $79" in sent[0][3]
+    assert f"https://changescout.example/app/target/{target_id}" in sent[0][3]
     with app_module.db() as conn:
         capture = conn.execute(
             "SELECT alert_status, alert_sent_at, alert_error "
@@ -777,7 +779,7 @@ def test_email_body_rendering(monkeypatch) -> None:
                 importance=5,
             ),
         ),
-        report_url="https://changescout.example/target/42",
+        report_url="https://changescout.example/app/target/42",
     )
 
     assert content.subject == (
@@ -788,4 +790,4 @@ def test_email_body_rendering(monkeypatch) -> None:
     assert "Detected: Jan 2, 2026 at 7:00 AM EST" in content.body
     assert "PRICE\n$99 -> $79\nPrice decreased by $20 (20.2%)." in content.body
     assert "PROMOTION\nNo visible promotion -> 20% off this week" in content.body
-    assert "https://changescout.example/target/42" in content.body
+    assert "https://changescout.example/app/target/42" in content.body

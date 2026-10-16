@@ -1,0 +1,195 @@
+from fastapi.testclient import TestClient
+import pytest
+
+import app as app_module
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "DB", tmp_path / "landing.db")
+    app_module.init_db()
+    return TestClient(app_module.app)
+
+
+def test_landing_page_explains_product_at_public_home(client) -> None:
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    body = response.text
+    assert (
+        "Know when competitors change prices, promotions, products, or messaging."
+        in body
+    )
+    assert (
+        "ChangeScout monitors competitor websites and alerts you when something "
+        "that matters changes"
+    ) in body
+    for step in (
+        "Add competitor pages",
+        "ChangeScout scans them automatically",
+        "Get meaningful alerts when something changes",
+    ):
+        assert step in body
+    for watched_change in (
+        "Price changes",
+        "Promotions",
+        "Shipping offers",
+        "Product changes",
+        "Calls to action",
+        "Positioning and messaging",
+    ):
+        assert watched_change in body
+    for example in (
+        "$99",
+        "$79",
+        "Down $20 (20.2%)",
+        "No promotion",
+        "20% off this week",
+        "Free shipping over $100",
+        "Free shipping over $50",
+        "Shop Now",
+        "Start Shopping",
+    ):
+        assert example in body
+    assert "Marketing example only." in body
+    assert "Founding Customer" in body
+    assert "$29" in body
+    assert "Growth" in body
+    assert "$59" in body
+    assert body.count('href="#contact"') >= 5
+    assert 'action="/landing/contact"' in body
+    assert "/static/landing.css?v=" in body
+
+    assert client.get("/landing").text == body
+    assert "Start monitoring your first competitor." not in body
+
+
+def test_landing_contact_form_stores_inquiry_and_confirms_submission(client) -> None:
+    response = client.post(
+        "/landing/contact",
+        data={
+            "name": "  Alex Morgan  ",
+            "business_name": "  Northstar Goods  ",
+            "email": "  alex@northstar.example  ",
+            "website": "  https://northstar.example/shop  ",
+            "message": "  We want to watch three pricing pages.  ",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/?submitted=1#contact"
+    with app_module.db() as conn:
+        inquiry = conn.execute(
+            """
+            SELECT name, business_name, email, website, message, created_at
+            FROM inquiries
+            """
+        ).fetchone()
+    assert inquiry is not None
+    assert inquiry["name"] == "Alex Morgan"
+    assert inquiry["business_name"] == "Northstar Goods"
+    assert inquiry["email"] == "alex@northstar.example"
+    assert inquiry["website"] == "https://northstar.example/shop"
+    assert inquiry["message"] == "We want to watch three pricing pages."
+    assert inquiry["created_at"]
+
+    confirmation = client.get("/?submitted=1")
+    assert confirmation.status_code == 200
+    assert "Thanks, your request is in." in confirmation.text
+    assert "does not create an account or start billing" in confirmation.text
+
+
+def test_landing_contact_form_accepts_blank_optional_fields(client) -> None:
+    response = client.post(
+        "/landing/contact",
+        data={
+            "name": "Sam Lee",
+            "business_name": "Harbor Supply",
+            "email": "sam@harbor.example",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with app_module.db() as conn:
+        inquiry = conn.execute(
+            "SELECT website, message FROM inquiries"
+        ).fetchone()
+    assert tuple(inquiry) == (None, None)
+
+
+def test_landing_contact_form_rejects_invalid_input_without_storing_it(
+    client,
+) -> None:
+    response = client.post(
+        "/landing/contact",
+        data={
+            "name": " ",
+            "business_name": "",
+            "email": "not-an-email",
+            "website": "competitor.example",
+            "message": "x" * 2001,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Enter your name." in response.text
+    assert "Enter your business name." in response.text
+    assert "Enter a valid email address." in response.text
+    assert "Enter a valid website address, including https://." in response.text
+    assert "Message must be 2,000 characters or fewer." in response.text
+    assert 'value="not-an-email"' in response.text
+    with app_module.db() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM inquiries").fetchone()[0]
+    assert count == 0
+
+
+def test_inquiry_schema_is_additive_and_idempotent(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "DB", tmp_path / "existing.db")
+    app_module.init_db()
+    with app_module.db() as conn:
+        conn.execute(
+            """
+            INSERT INTO inquiries(
+                name, business_name, email, website, message, created_at
+            )
+            VALUES(?,?,?,?,?,?)
+            """,
+            (
+                "Existing lead",
+                "Existing business",
+                "owner@example.com",
+                None,
+                None,
+                "2026-10-14T12:00:00+00:00",
+            ),
+        )
+
+    app_module.init_db()
+
+    with app_module.db() as conn:
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(inquiries)")
+        }
+        count = conn.execute("SELECT COUNT(*) FROM inquiries").fetchone()[0]
+    assert columns == {
+        "id",
+        "name",
+        "business_name",
+        "email",
+        "website",
+        "message",
+        "created_at",
+    }
+    assert count == 1
+
+
+def test_landing_stylesheet_is_served_with_mobile_layout_rules(client) -> None:
+    response = client.get("/static/landing.css")
+
+    assert response.status_code == 200
+    assert "@media (max-width: 767.98px)" in response.text
+    assert ".contact-layout" in response.text
+    assert "overflow-x: hidden" not in response.text

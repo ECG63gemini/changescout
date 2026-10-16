@@ -158,7 +158,7 @@ def test_operator_can_create_customer(tmp_path, monkeypatch) -> None:
     assert response.status_code == 303
     with app_module.db() as conn:
         customer = conn.execute("SELECT * FROM customers").fetchone()
-    assert response.headers["location"] == f"/customer/{customer['id']}"
+    assert response.headers["location"] == f"/app/customer/{customer['id']}"
     assert customer["name"] == "Acme Retail"
     assert customer["email"] == "owner@example.com"
     assert customer["active"] == 1
