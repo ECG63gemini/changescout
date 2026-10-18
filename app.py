@@ -36,6 +36,7 @@ from emailing import (
     EmailDeliveryError,
     SMTPSettings,
     render_change_alert,
+    render_inquiry_notification,
     send_email,
     validate_email_address,
 )
@@ -1110,6 +1111,44 @@ def _inquiry_website_error(value: str) -> str | None:
     return None
 
 
+def _send_inquiry_notification(
+    *,
+    inquiry_id: int,
+    name: str,
+    business_name: str,
+    email: str,
+    website: str | None,
+    message: str | None,
+    submitted_at: str,
+) -> None:
+    recipient = os.getenv("INQUIRY_NOTIFICATION_EMAIL", "").strip()
+    if not recipient:
+        return
+    smtp_settings = SMTPSettings.from_environment()
+    if not smtp_settings.configured:
+        logger.info(
+            "Inquiry notification for inquiry %s was not sent because "
+            "email is not configured.",
+            inquiry_id,
+        )
+        return
+    content = render_inquiry_notification(
+        name=name,
+        business_name=business_name,
+        email=email,
+        website=website,
+        message=message,
+        submitted_at=submitted_at,
+    )
+    try:
+        send_email(smtp_settings, recipient, content)
+    except (EmailDeliveryError, ValueError):
+        logger.warning(
+            "Inquiry notification delivery failed for inquiry %s.",
+            inquiry_id,
+        )
+
+
 @app.post("/landing/contact")
 def create_inquiry(
     name: str = Form(""),
@@ -1152,8 +1191,9 @@ def create_inquiry(
             pages.landing_page(values=values, errors=errors),
             status_code=400,
         )
+    submitted_at = datetime.now(timezone.utc).isoformat()
     with db() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO inquiries(
                 name, business_name, email, website, message, created_at
@@ -1166,9 +1206,19 @@ def create_inquiry(
                 email,
                 website or None,
                 message or None,
-                datetime.now(timezone.utc).isoformat(),
+                submitted_at,
             ),
         )
+        inquiry_id = int(cursor.lastrowid)
+    _send_inquiry_notification(
+        inquiry_id=inquiry_id,
+        name=name,
+        business_name=business_name,
+        email=email,
+        website=website or None,
+        message=message or None,
+        submitted_at=submitted_at,
+    )
     return RedirectResponse("/?submitted=1#contact", status_code=303)
 
 

@@ -128,9 +128,12 @@ HTML error page instead of JSON.
 ## Public inquiries
 
 The public form at `/` (also available at `/landing`) posts to
-`/landing/contact` and redirects to `/?submitted=1#contact`. It does not create an
-account, start billing, or send email. A valid submission is stored in SQLite
-and redirects back to an on-page confirmation.
+`/landing/contact` and redirects to `/?submitted=1#contact`. It does not create
+an account or start billing. A valid submission is stored in SQLite before any
+optional operator email and redirects back to an on-page confirmation.
+Configure `INQUIRY_NOTIFICATION_EMAIL` with the SMTP settings below to notify
+an operator. Missing email configuration or a delivery failure does not change
+inquiry storage or the visitor confirmation.
 
 Startup creates one additive table when it is missing:
 
@@ -160,21 +163,25 @@ SMTP_USERNAME=your-smtp-user
 SMTP_PASSWORD=your-smtp-password
 SMTP_FROM=alerts@example.com
 SMTP_USE_TLS=true
+INQUIRY_NOTIFICATION_EMAIL=operator@example.com
 APP_BASE_URL=https://changescout.example.com
 ```
 
 `SMTP_USERNAME` and `SMTP_PASSWORD` may both be blank for an SMTP relay that
 does not require authentication. `APP_BASE_URL` is the optional public site
 origin, without `/app` (for example `https://changescout.example.com`).
+`INQUIRY_NOTIFICATION_EMAIL` is optional and receives new landing-page
+inquiries only when SMTP is configured. Inquiry notification failures are
+logged without changing the saved inquiry or public confirmation.
 Report links append `/app/target/{id}` and require operator authentication;
 these are not public customer report links. Existing emails with old
 `/target/{id}` links must be opened using `/app/target/{id}` instead.
 
-Email is sent only when a capture contains deterministic structured business
-changes. Baselines, no-change captures, and visual-only differences do not
-send email. Each capture records whether its alert was sent, skipped because
-configuration was missing, or failed. Monitoring and reports continue when
-SMTP is not configured.
+A change alert is sent only when a capture contains deterministic structured
+business changes. Baselines, no-change captures, and visual-only differences
+do not send change alerts. Each capture records whether its alert was sent,
+skipped because configuration was missing, or failed. Monitoring and reports
+continue when SMTP is not configured.
 
 Test SMTP configuration without creating a page change:
 
@@ -197,6 +204,7 @@ Also add these Railway service variables before public launch:
 ADMIN_USERNAME=<your-private-operator-username>
 ADMIN_PASSWORD=<your-long-random-operator-password>
 APP_BASE_URL=https://<your-public-domain>
+INQUIRY_NOTIFICATION_EMAIL=<your-operator-email-address>
 ```
 
 Keep the existing `DATA_DIR`, SMTP, scheduler, volume, replica, and start-command

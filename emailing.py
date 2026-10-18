@@ -115,6 +115,41 @@ def _header_text(value: str) -> str:
     return " ".join(value.replace("\r", " ").replace("\n", " ").split())
 
 
+def render_inquiry_notification(
+    *,
+    name: str,
+    business_name: str,
+    email: str,
+    website: str | None,
+    message: str | None,
+    submitted_at: str,
+) -> EmailContent:
+    lines = [
+        "A new landing-page inquiry was submitted.",
+        "",
+        f"Name: {name}",
+        f"Business name: {business_name}",
+        f"Email: {email}",
+    ]
+    if website:
+        lines.append(f"Website: {website}")
+    if message:
+        lines.extend(["", "Message:", message])
+    lines.extend(
+        [
+            "",
+            f"Submission time: {format_display_time(submitted_at)}",
+        ]
+    )
+    return EmailContent(
+        subject=(
+            "ChangeScout: New inquiry from "
+            f"{_header_text(business_name)}"
+        ),
+        body="\n".join(lines).rstrip() + "\n",
+    )
+
+
 def render_change_alert(
     *,
     competitor_name: str,

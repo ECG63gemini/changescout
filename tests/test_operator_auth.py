@@ -35,6 +35,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "DB", tmp_path / "operator-auth.db")
     monkeypatch.setenv("ADMIN_USERNAME", OPERATOR_AUTH[0])
     monkeypatch.setenv("ADMIN_PASSWORD", OPERATOR_AUTH[1])
+    monkeypatch.delenv("INQUIRY_NOTIFICATION_EMAIL", raising=False)
     app_module._active_checks.clear()
     app_module.init_db()
     with app_module.db() as conn:
