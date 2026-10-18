@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 import pytest
 
@@ -222,6 +224,108 @@ def test_landing_contact_form_keeps_inquiry_when_notification_fails(
     assert "Inquiry notification delivery failed for inquiry 1." in caplog.text
     assert "smtp-user" not in caplog.text
     assert "smtp-secret" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "delivery_result",
+    ["sent", "http_error", "timeout", "invalid_response"],
+)
+def test_resend_inquiry_notification_preserves_storage_and_confirmation(
+    client,
+    monkeypatch,
+    resend_api,
+    caplog,
+    delivery_result,
+) -> None:
+    _configure_smtp(monkeypatch)
+    monkeypatch.setenv("SMTP_USERNAME", "smtp-user")
+    monkeypatch.setenv("SMTP_PASSWORD", "smtp-secret")
+    monkeypatch.setenv("INQUIRY_NOTIFICATION_EMAIL", "operator@example.com")
+    connection = resend_api.return_value
+    if delivery_result == "http_error":
+        connection.getresponse.return_value.status = 503
+    elif delivery_result == "invalid_response":
+        connection.getresponse.return_value.read.return_value = (
+            b'{"message":"Authorization: Bearer re_test_api_key smtp-secret"}'
+        )
+
+    def request_after_storage(*args, **kwargs) -> None:
+        with app_module.db() as conn:
+            inquiry = conn.execute(
+                "SELECT name, business_name, email FROM inquiries"
+            ).fetchone()
+        assert tuple(inquiry) == (
+            "Alex Morgan",
+            "Northstar Goods",
+            "alex@northstar.example",
+        )
+        if delivery_result == "timeout":
+            raise TimeoutError(
+                "Authorization: Bearer re_test_api_key smtp-secret"
+            )
+
+    connection.request.side_effect = request_after_storage
+    with caplog.at_level("INFO", logger="changescout"):
+        response = client.post(
+            "/landing/contact",
+            data={
+                "name": "Alex Morgan",
+                "business_name": "Northstar Goods",
+                "email": "alex@northstar.example",
+                "website": "https://northstar.example/shop",
+                "message": "We want to watch three pricing pages.",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/?submitted=1#contact"
+    assert "Thanks, your request is in." in client.get("/?submitted=1").text
+    resend_api.assert_called_once_with("api.resend.com", timeout=30)
+    connection.request.assert_called_once()
+    connection.close.assert_called_once_with()
+    payload = json.loads(connection.request.call_args.kwargs["body"])
+    assert payload["from"] == "alerts@example.com"
+    assert payload["to"] == ["operator@example.com"]
+    assert payload["subject"] == "ChangeScout: New inquiry from Northstar Goods"
+    assert "Name: Alex Morgan" in payload["text"]
+    assert "Business name: Northstar Goods" in payload["text"]
+    assert "Email: alex@northstar.example" in payload["text"]
+    assert "Website: https://northstar.example/shop" in payload["text"]
+    assert "Message:\nWe want to watch three pricing pages." in payload["text"]
+    with app_module.db() as conn:
+        inquiries = conn.execute("SELECT created_at FROM inquiries").fetchall()
+    assert len(inquiries) == 1
+    assert (
+        f"Submission time: {format_display_time(inquiries[0]['created_at'])}"
+        in payload["text"]
+    )
+    if delivery_result == "sent":
+        assert "Inquiry notification delivery failed" not in caplog.text
+    else:
+        assert "Inquiry notification delivery failed for inquiry 1." in caplog.text
+    for secret in ("re_test_api_key", "smtp-secret", "Authorization", "Bearer"):
+        assert secret not in caplog.text
+
+
+def test_resend_inquiry_is_not_sent_without_operator_recipient(
+    client,
+    resend_api,
+) -> None:
+    response = client.post(
+        "/landing/contact",
+        data={
+            "name": "Sam Lee",
+            "business_name": "Harbor Supply",
+            "email": "sam@harbor.example",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    resend_api.assert_not_called()
+    with app_module.db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM inquiries").fetchone()[0] == 1
 
 
 def test_landing_contact_form_does_not_notify_without_recipient(

@@ -13,7 +13,7 @@ A deliberately small competitor-page monitoring product.
 - Classify text changes as price, promotion, shipping, product, CTA, positioning, or other
 - Show high-confidence old → new business changes with deterministic impact explanations
 - Automatically check enabled monitors hourly, every 6 hours, or daily
-- Send deduplicated SMTP alerts for meaningful structured business changes
+- Send deduplicated email alerts through Resend HTTPS or SMTP for meaningful structured business changes
 - Optionally use `browser-use`'s OpenAI client to summarize already-extracted changes
 
 This is designed as a **managed-service MVP**. Do not add teams, complex billing, multi-user auth, Slack, or scheduled jobs until customers pay.
@@ -131,7 +131,7 @@ The public form at `/` (also available at `/landing`) posts to
 `/landing/contact` and redirects to `/?submitted=1#contact`. It does not create
 an account or start billing. A valid submission is stored in SQLite before any
 optional operator email and redirects back to an on-page confirmation.
-Configure `INQUIRY_NOTIFICATION_EMAIL` with the SMTP settings below to notify
+Configure `INQUIRY_NOTIFICATION_EMAIL` with either email provider below to notify
 an operator. Missing email configuration or a delivery failure does not change
 inquiry storage or the visitor confirmation.
 
@@ -154,7 +154,31 @@ capture records. Re-running startup preserves existing inquiries.
 
 ## Email alerts
 
-Configure vendor-neutral SMTP settings in `.env`:
+Email delivery is selected once per send:
+
+1. When both `RESEND_API_KEY` and `RESEND_FROM_EMAIL` are nonblank, all change
+   alerts, inquiry notifications, and test emails use Resend's HTTPS API at
+   `https://api.resend.com/emails`.
+2. Otherwise, the existing SMTP configuration and delivery behavior are used.
+   Partial or blank Resend configuration does not disable SMTP.
+
+Resend requires no additional Python dependency. Configure it in `.env` with
+an API key that can send email and a sender address on a verified Resend domain:
+
+```dotenv
+RESEND_API_KEY=re_your_resend_api_key
+RESEND_FROM_EMAIL=alerts@your-verified-domain.example
+INQUIRY_NOTIFICATION_EMAIL=operator@example.com
+APP_BASE_URL=https://changescout.example.com
+```
+
+Use a plain sender email address for `RESEND_FROM_EMAIL`, without a display
+name. For initial testing, Resend's `onboarding@resend.dev` sender is restricted
+to your Resend account's own email address; use a verified domain for production
+and customer recipients.
+
+To use vendor-neutral SMTP locally or on a host where SMTP is available, leave
+at least one Resend variable unset and configure the existing settings:
 
 ```dotenv
 SMTP_HOST=smtp.example.com
@@ -171,7 +195,7 @@ APP_BASE_URL=https://changescout.example.com
 does not require authentication. `APP_BASE_URL` is the optional public site
 origin, without `/app` (for example `https://changescout.example.com`).
 `INQUIRY_NOTIFICATION_EMAIL` is optional and receives new landing-page
-inquiries only when SMTP is configured. Inquiry notification failures are
+inquiries when the selected email provider is configured. Inquiry notification failures are
 logged without changing the saved inquiry or public confirmation.
 Report links append `/app/target/{id}` and require operator authentication;
 these are not public customer report links. Existing emails with old
@@ -181,13 +205,36 @@ A change alert is sent only when a capture contains deterministic structured
 business changes. Baselines, no-change captures, and visual-only differences
 do not send change alerts. Each capture records whether its alert was sent,
 skipped because configuration was missing, or failed. Monitoring and reports
-continue when SMTP is not configured.
+continue when neither email provider is configured. Resend API errors,
+timeouts, and invalid responses are reported as delivery failures without
+failing the capture or inquiry. A Resend failure does **not** retry through SMTP;
+the existing per-capture deduplication and inquiry storage-before-notification
+behavior are unchanged. API keys, SMTP passwords, authorization headers, and
+raw Resend error bodies are not logged.
 
-Test SMTP configuration without creating a page change:
+Test the selected email provider without creating a page change:
 
 ```bash
 python send_test_email.py owner@example.com
 ```
+
+For a local Resend smoke test:
+
+1. Set both Resend variables and `INQUIRY_NOTIFICATION_EMAIL` in `.env`. Keep
+   API keys and passwords private and out of source control.
+2. Run the test-email command above from your activated virtual environment.
+   Check the recipient inbox and the Resend email log. A successful command
+   means the API accepted the message; inbox delivery can still be affected by
+   bounces or spam filtering.
+3. Start or restart ChangeScout and submit the public landing-page contact
+   form. Confirm the visitor confirmation and operator notification.
+4. Monitor a public test page you control with your email as the alert
+   recipient. Select **Scan now** for a baseline, change a visible price
+   (for example $99 to $79), then scan again. Confirm one meaningful-change
+   alert. A further unchanged scan should not send another alert.
+5. To check SMTP fallback, remove either Resend variable from the process
+   environment and `.env`, restart, and rerun the test-email command with
+   working SMTP settings.
 
 ## Railway deployment
 
@@ -207,9 +254,38 @@ APP_BASE_URL=https://<your-public-domain>
 INQUIRY_NOTIFICATION_EMAIL=<your-operator-email-address>
 ```
 
-Keep the existing `DATA_DIR`, SMTP, scheduler, volume, replica, and start-command
+Outbound SMTP is blocked on the current Railway hosting plan. For production
+email, add both of these service variables so delivery uses HTTPS on port 443:
+
+```dotenv
+RESEND_API_KEY=<your-resend-api-key-with-email-sending-permission>
+RESEND_FROM_EMAIL=alerts@your-verified-domain.example
+```
+
+Set `INQUIRY_NOTIFICATION_EMAIL` to receive landing-page inquiry notifications;
+change-alert recipients still come from the existing customer/monitor settings,
+and the test-email command takes its recipient as an argument. SMTP variables
+are not required on Railway when both Resend variables are set. Existing SMTP
+values may remain configured; Resend takes precedence. Do not rely on SMTP
+fallback on this Railway plan.
+
+Keep the existing `DATA_DIR`, scheduler, volume, replica, and start-command
 settings unchanged. `APP_BASE_URL` is optional if you do not want email report
 links; otherwise set it to the site origin, not the `/app` URL.
+
+After applying the variables and restarting the service when ready, open a
+shell **inside the running Railway service** and run:
+
+```bash
+python send_test_email.py owner@example.com
+```
+
+Confirm acceptance in Resend and receipt in the inbox. Then submit the public
+contact form and repeat the controlled-page baseline/price-change/unchanged
+scan checks described above against the Railway site. Running the command
+locally with Railway variables alone does not verify connectivity from the
+Railway service. Delivery failures should leave captures and inquiries saved
+and produce credential-free diagnostics.
 
 The image starts exactly one application process with Railway's `PORT`:
 

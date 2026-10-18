@@ -1,10 +1,13 @@
+import json
 import os
 import re
 import smtplib
 import ssl
 from collections.abc import Mapping
-from dataclasses import dataclass
+from contextlib import closing
+from dataclasses import dataclass, field
 from email.message import EmailMessage
+from http.client import HTTPException, HTTPSConnection
 
 from display_time import format_display_time
 from monitoring import StructuredChange
@@ -23,7 +26,7 @@ class SMTPSettings:
     host: str
     port: int
     username: str
-    password: str
+    password: str = field(repr=False)
     from_address: str
     use_tls: bool
     configuration_error: str | None = None
@@ -86,6 +89,49 @@ class SMTPSettings:
             use_tls=use_tls,
             configuration_error=error,
         )
+
+
+@dataclass(frozen=True)
+class ResendSettings:
+    api_key: str = field(repr=False)
+    from_address: str
+    configuration_error: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return self.configuration_error is None
+
+    @classmethod
+    def from_environment(
+        cls,
+        environment: Mapping[str, str] | None = None,
+    ) -> "ResendSettings":
+        env = environment if environment is not None else os.environ
+        api_key = env.get("RESEND_API_KEY", "").strip()
+        from_address = env.get("RESEND_FROM_EMAIL", "").strip()
+        error: str | None = None
+        if not api_key or not from_address:
+            error = "RESEND_API_KEY and RESEND_FROM_EMAIL are required."
+        elif not valid_email_address(from_address):
+            error = "RESEND_FROM_EMAIL must be a valid email address."
+        return cls(
+            api_key=api_key,
+            from_address=from_address,
+            configuration_error=error,
+        )
+
+
+EmailSettings = SMTPSettings | ResendSettings
+
+
+def email_settings_from_environment(
+    environment: Mapping[str, str] | None = None,
+) -> EmailSettings:
+    env = environment if environment is not None else os.environ
+    resend = ResendSettings.from_environment(env)
+    if resend.api_key and resend.from_address:
+        return resend
+    return SMTPSettings.from_environment(env)
 
 
 @dataclass(frozen=True)
@@ -187,15 +233,19 @@ def render_change_alert(
 
 
 def send_email(
-    settings: SMTPSettings,
+    settings: EmailSettings,
     recipient: str,
     content: EmailContent,
 ) -> None:
     if not settings.configured:
         raise EmailDeliveryError(
-            settings.configuration_error or "SMTP is not configured."
+            settings.configuration_error or "Email is not configured."
         )
     validated_recipient = validate_email_address(recipient)
+    if isinstance(settings, ResendSettings):
+        _send_resend_email(settings, validated_recipient, content)
+        return
+
     message = EmailMessage()
     message["From"] = settings.from_address
     message["To"] = validated_recipient
@@ -215,3 +265,46 @@ def send_email(
         raise EmailDeliveryError(
             f"SMTP delivery failed ({type(exc).__name__})."
         ) from exc
+
+
+def _send_resend_email(
+    settings: ResendSettings,
+    recipient: str,
+    content: EmailContent,
+) -> None:
+    payload = {
+        "from": settings.from_address,
+        "to": [recipient],
+        "subject": content.subject,
+        "text": content.body,
+    }
+    try:
+        with closing(HTTPSConnection("api.resend.com", timeout=30)) as connection:
+            connection.request(
+                "POST",
+                "/emails",
+                body=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {settings.api_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "ChangeScout",
+                },
+            )
+            response = connection.getresponse()
+            if not 200 <= response.status < 300:
+                raise EmailDeliveryError(
+                    f"Resend delivery failed (HTTP {response.status})."
+                )
+            result = json.loads(response.read())
+    except (OSError, HTTPException, ValueError) as exc:
+        # Provider exception text can contain credentials or authorization headers.
+        raise EmailDeliveryError(
+            f"Resend delivery failed ({type(exc).__name__})."
+        ) from None
+
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("id"), str)
+        or not result["id"].strip()
+    ):
+        raise EmailDeliveryError("Resend returned an invalid email response.")

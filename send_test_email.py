@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from emailing import (
     EmailContent,
     EmailDeliveryError,
-    SMTPSettings,
+    email_settings_from_environment,
     send_email,
     validate_email_address,
 )
@@ -16,7 +16,7 @@ BASE = Path(__file__).resolve().parent
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Send a harmless ChangeScout SMTP configuration test."
+        description="Send a harmless ChangeScout email configuration test."
     )
     parser.add_argument("recipient", help="Email address that should receive the test")
     args = parser.parse_args()
@@ -27,7 +27,7 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    settings = SMTPSettings.from_environment()
+    settings = email_settings_from_environment()
     if not settings.configured:
         raise SystemExit(
             f"Email is not configured: {settings.configuration_error}"

@@ -1,7 +1,11 @@
 import asyncio
+import json
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
 
 import app as app_module
 from display_time import format_display_time
@@ -412,6 +416,94 @@ def test_meaningful_change_sends_one_alert(tmp_path, monkeypatch) -> None:
     assert capture["alert_status"] == "sent"
     assert capture["alert_sent_at"]
     assert capture["alert_error"] is None
+
+
+@pytest.mark.parametrize(
+    "delivery_result",
+    ["sent", "http_error", "timeout", "invalid_response"],
+)
+def test_resend_change_alert_preserves_capture_and_deduplication(
+    tmp_path,
+    monkeypatch,
+    resend_api,
+    caplog,
+    delivery_result,
+) -> None:
+    _use_test_database(tmp_path, monkeypatch)
+    _configure_smtp(monkeypatch)
+    monkeypatch.setenv("SMTP_USERNAME", "smtp-user")
+    monkeypatch.setenv("SMTP_PASSWORD", "smtp-secret")
+    monkeypatch.setenv("APP_BASE_URL", "https://changescout.example")
+    connection = resend_api.return_value
+    response = connection.getresponse.return_value
+    if delivery_result == "http_error":
+        response.status = 503
+        response.read.return_value = (
+            b'{"message":"Authorization: Bearer re_test_api_key smtp-secret"}'
+        )
+    elif delivery_result == "timeout":
+        connection.request.side_effect = TimeoutError(
+            "Authorization: Bearer re_test_api_key smtp-secret"
+        )
+    elif delivery_result == "invalid_response":
+        response.read.return_value = b'{"message":"re_test_api_key smtp-secret"}'
+
+    target_id = _insert_target()
+    _insert_capture(target_id, _demo_text("before"))
+
+    async def capture_demo(capture_target_id: int, capture_url: str):
+        assert capture_target_id == target_id
+        assert capture_url.startswith("https://")
+        return tmp_path / "after.png", _demo_text("after")
+
+    monkeypatch.setattr(app_module, "capture_page", capture_demo)
+    monkeypatch.setattr(app_module, "visual_change_score", lambda old, new: 0.0)
+    monkeypatch.setattr(app_module, "ai_summary", AsyncMock(return_value=None))
+
+    with caplog.at_level("INFO", logger="changescout"):
+        result = asyncio.run(app_module.run_target_check(target_id))
+
+    expected_status = "sent" if delivery_result == "sent" else "failed"
+    assert result.completed
+    assert result.alert_status == expected_status
+    assert result.capture_id is not None
+    assert app_module._email_settings() == (True, None)
+    assert (
+        asyncio.run(app_module.deliver_capture_alert(result.capture_id))
+        == expected_status
+    )
+    resend_api.assert_called_once_with("api.resend.com", timeout=30)
+    connection.request.assert_called_once()
+    connection.close.assert_called_once_with()
+    payload = json.loads(connection.request.call_args.kwargs["body"])
+    assert payload["from"] == "alerts@example.com"
+    assert payload["to"] == ["owner@example.com"]
+    assert "important changes at Example Competitor" in payload["subject"]
+    assert "$99 -> $79" in payload["text"]
+    assert f"https://changescout.example/app/target/{target_id}" in payload["text"]
+    with app_module.db() as conn:
+        capture = conn.execute(
+            "SELECT alert_status, alert_sent_at, alert_error, text_content "
+            "FROM captures WHERE id=?",
+            (result.capture_id,),
+        ).fetchone()
+        target = conn.execute(
+            "SELECT last_check_error FROM targets WHERE id=?",
+            (target_id,),
+        ).fetchone()
+    assert capture["alert_status"] == expected_status
+    assert capture["text_content"] == _demo_text("after")
+    assert target["last_check_error"] is None
+    if expected_status == "sent":
+        assert capture["alert_sent_at"]
+        assert capture["alert_error"] is None
+    else:
+        assert capture["alert_sent_at"] is None
+        assert "Resend" in capture["alert_error"]
+        assert "Email alert delivery failed" in caplog.text
+    for secret in ("re_test_api_key", "smtp-secret", "Authorization", "Bearer"):
+        assert secret not in caplog.text
+        assert secret not in (capture["alert_error"] or "")
 
 
 def test_no_change_capture_does_not_send_alert(tmp_path, monkeypatch) -> None:

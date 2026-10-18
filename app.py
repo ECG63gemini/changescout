@@ -34,7 +34,8 @@ import pages
 from emailing import (
     EmailContent,
     EmailDeliveryError,
-    SMTPSettings,
+    EmailSettings,
+    email_settings_from_environment,
     render_change_alert,
     render_inquiry_notification,
     send_email,
@@ -260,7 +261,7 @@ class CheckResult:
         return self.status == "completed"
 
 
-EmailSender = Callable[[SMTPSettings, str, EmailContent], None]
+EmailSender = Callable[[EmailSettings, str, EmailContent], None]
 
 
 def db() -> sqlite3.Connection:
@@ -769,9 +770,9 @@ async def deliver_capture_alert(
         _update_alert_status(capture_id, "failed", error=error)
         return "failed"
 
-    smtp_settings = SMTPSettings.from_environment()
-    if not smtp_settings.configured:
-        error = smtp_settings.configuration_error or "SMTP is not configured."
+    settings = email_settings_from_environment()
+    if not settings.configured:
+        error = settings.configuration_error or "Email is not configured."
         _update_alert_status(capture_id, "not_configured", error=error)
         logger.info(
             "Alert for capture %s was not sent because email is not configured.",
@@ -806,7 +807,7 @@ async def deliver_capture_alert(
     delivery_task = asyncio.create_task(
         asyncio.to_thread(
             sender,
-            smtp_settings,
+            settings,
             recipient,
             content,
         )
@@ -1032,7 +1033,7 @@ def _load_feed(
 
 
 def _email_settings() -> tuple[bool, str | None]:
-    settings = SMTPSettings.from_environment()
+    settings = email_settings_from_environment()
     return settings.configured, settings.configuration_error
 
 
@@ -1124,8 +1125,8 @@ def _send_inquiry_notification(
     recipient = os.getenv("INQUIRY_NOTIFICATION_EMAIL", "").strip()
     if not recipient:
         return
-    smtp_settings = SMTPSettings.from_environment()
-    if not smtp_settings.configured:
+    settings = email_settings_from_environment()
+    if not settings.configured:
         logger.info(
             "Inquiry notification for inquiry %s was not sent because "
             "email is not configured.",
@@ -1141,7 +1142,7 @@ def _send_inquiry_notification(
         submitted_at=submitted_at,
     )
     try:
-        send_email(smtp_settings, recipient, content)
+        send_email(settings, recipient, content)
     except (EmailDeliveryError, ValueError):
         logger.warning(
             "Inquiry notification delivery failed for inquiry %s.",
